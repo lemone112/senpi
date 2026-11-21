@@ -74,8 +74,8 @@ export async function followMcpTask(
 		for (;;) {
 			signal.throwIfAborted();
 			if (task.status === "completed") {
-				if (!isRecord(task.result)) throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
 				terminal = true;
+				if (!isRecord(task.result)) throw new McpMrtrError("MCP_TASK_INVALID_RESULT", undefined, id);
 				return task.result;
 			}
 			if (task.status === "failed") {

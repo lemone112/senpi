@@ -124,6 +124,9 @@ server configuration identity, and original output contract, never credentials
 or a second copy of the server's result. The server must retain its task long
 enough for the session to recover it. Unavailable or changed configurations leave
 the reference pending instead of sending it to a different server.
+If a completed task's final output violates its tool contract, the session receives
+an error diagnostic with the accepted task ID. Invalid final output is not polled
+again; transport failures before observing completion remain recoverable.
 
 Changed nonempty task status messages also enter native follow-up admission. A
 server can request browser participation in an authorized status message while

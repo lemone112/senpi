@@ -27,7 +27,7 @@ import { createMcpLogger } from "./log.ts";
 import { prepareProjectSkillServer } from "./project-skill-policy.ts";
 import { createMcpRequestOrigin, mcpRequestOptions, type McpRequestOrigin } from "./request-origin.ts";
 import { isModernMcpClient } from "./modern/request.ts";
-import { validateModernToolResult } from "./modern/tools.ts";
+import { validateCompletedMcpTaskResult } from "./modern/tools.ts";
 import { McpSessionTasks } from "./session-tasks.ts";
 import { loadMcpSdkTypes } from "./sdk.lazy.ts";
 import { reconnectMcpNow } from "./reconnect.ts";
@@ -409,7 +409,7 @@ export class McpService {
 							{ signal, timeout: binding.config.servers[reference.server]?.config?.requestTimeoutMs },
 						),
 					);
-					const result = await validateModernToolResult(raw, reference.outputSchema);
+					const result = await validateCompletedMcpTaskResult(raw, reference.outputSchema, reference.taskId);
 					const content = await applyMcpOutputGuard([{ type: "text", text: JSON.stringify(result) }], {
 						server: reference.server,
 						agentDir: binding.options.agentDir,

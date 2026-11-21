@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import {
 	McpSessionTasks,
@@ -6,7 +7,7 @@ import {
 	mcpTaskDeliveryId,
 	type McpTaskReference,
 } from "../../src/core/extensions/builtin/mcp/session-tasks.ts";
-import { callModernTool } from "../../src/core/extensions/builtin/mcp/modern/tools.ts";
+import { callModernTool, validateCompletedMcpTaskResult } from "../../src/core/extensions/builtin/mcp/modern/tools.ts";
 import { createMcpRequestOrigin, mcpRequestOptions } from "../../src/core/extensions/builtin/mcp/request-origin.ts";
 import { cleanupMrtrLifecycle, fixture } from "./fixtures/mrtr-lifecycle.ts";
 
@@ -95,6 +96,115 @@ describe("accepted MCP work belongs to the session", () => {
 			callModernTool(f.client, { name: "work" }, undefined, mcpRequestOptions(origin)),
 		).rejects.toMatchObject({ code: "MCP_TASK_PERSIST_FAILED", taskId: seed.taskId });
 		expect(f.transport.calls).toHaveLength(1);
+	});
+
+	it.each(["outputSchema", "content"])(
+		"delivers an invalid completed %s once instead of retrying observation",
+		async (kind) => {
+			const f = hostFixture();
+			f.observe.mockImplementation(async (reference) =>
+				JSON.stringify(
+					await validateCompletedMcpTaskResult(
+						{
+							content:
+								kind === "content" ? [{ type: "text", text: 42 }] : [{ type: "text", text: "bad output" }],
+						},
+						kind === "outputSchema" ? { type: "object", required: ["answer"] } : undefined,
+						reference.taskId,
+					),
+				),
+			);
+			await f.observer.accept(pointer, seed);
+			await vi.waitFor(() => expect(f.admit).toHaveBeenCalledOnce());
+			expect(f.admit.mock.calls[0][0]).toMatchObject({ text: expect.stringContaining(seed.taskId) });
+			expect(f.admit.mock.calls[0][0]).toMatchObject({ text: expect.stringContaining('"isError":true') });
+			expect(f.admit.mock.calls[0][0]).toMatchObject({
+				text: expect.stringContaining(
+					kind === "content" ? "MCP_MRTR_INVALID_RESULT" : "MCP_OUTPUT_SCHEMA_MISMATCH",
+				),
+			});
+			await vi.advanceTimersByTimeAsync(31_000);
+			expect(f.observe).toHaveBeenCalledOnce();
+			expect(f.onError).not.toHaveBeenCalled();
+			f.emitted.push(f.pending[0]);
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(f.close).toHaveBeenCalledWith("consumed");
+		},
+	);
+
+	it.each([
+		{ inputRequests: {} },
+		{ inputResponses: {} },
+		{ requestState: "invalid-final-state" },
+		{ resultType: "input_required" },
+		{ _meta: 42 },
+	])("delivers invalid completed envelopes from the real adapter once: %j", async (fields) => {
+		const f = await fixture(
+			[
+				{
+					...seed,
+					resultType: "complete",
+					status: "completed",
+					result: { content: [{ type: "text", text: "invalid envelope" }], ...fields },
+				},
+			],
+			true,
+		);
+		const host = hostFixture();
+		host.observe.mockImplementation(async (reference, signal) =>
+			JSON.stringify(
+				await f.client.request(
+					{ method: "tasks/get", params: { taskId: reference.taskId } },
+					ResultSchema,
+					mcpRequestOptions(createMcpRequestOrigin({ ...f.origin(), observingTaskId: reference.taskId }), {
+						signal,
+					}),
+				),
+			),
+		);
+		await host.observer.accept(pointer, seed);
+		await vi.waitFor(() => expect(host.admit).toHaveBeenCalledOnce());
+		expect(host.admit.mock.calls[0][0]).toMatchObject({
+			text: expect.stringContaining(`Task ${seed.taskId}: Task completed, but its final result is invalid`),
+		});
+		await vi.advanceTimersByTimeAsync(31_000);
+		expect(host.observe).toHaveBeenCalledOnce();
+		expect(host.onError).not.toHaveBeenCalled();
+		expect(f.transport.calls).toMatchObject([{ method: "tasks/get", params: { taskId: seed.taskId } }]);
+	});
+
+	it("does not turn a malformed pre-completion observation into a terminal result", async () => {
+		const f = await fixture(
+			[
+				{ ...seed, resultType: "complete", status: "invalid" },
+				{
+					...seed,
+					resultType: "complete",
+					status: "completed",
+					result: { content: [{ type: "text", text: "recovered result" }] },
+				},
+			],
+			true,
+		);
+		const host = hostFixture();
+		host.observe.mockImplementation(async (reference, signal) =>
+			JSON.stringify(
+				await f.client.request(
+					{ method: "tasks/get", params: { taskId: reference.taskId } },
+					ResultSchema,
+					mcpRequestOptions(createMcpRequestOrigin({ ...f.origin(), observingTaskId: reference.taskId }), {
+						signal,
+					}),
+				),
+			),
+		);
+		await host.observer.accept(pointer, seed);
+		await vi.waitFor(() => expect(host.onError).toHaveBeenCalledOnce());
+		expect(host.admit).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(host.admit).toHaveBeenCalledOnce();
+		expect(host.admit.mock.calls[0][0]).toMatchObject({ text: expect.stringContaining("recovered result") });
+		expect(f.transport.calls).toHaveLength(2);
 	});
 
 	it("persists the pointer before observing and waits for native emitted history, not queue admission", async () => {

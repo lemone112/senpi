@@ -91,3 +91,29 @@ export async function validateModernToolResult(
 	}
 	return result;
 }
+
+/** The task is already completed: invalid final output is a diagnostic, not another observation. */
+export async function validateCompletedMcpTaskResult(
+	raw: Record<string, unknown>,
+	outputSchema: McpJsonSchema | undefined,
+	taskId: string,
+) {
+	try {
+		return await validateModernToolResult(raw, outputSchema);
+	} catch (error) {
+		if (
+			!(error instanceof McpToolSchemaError) &&
+			!(error instanceof McpMrtrError && error.code === "MCP_MRTR_INVALID_RESULT")
+		)
+			throw error;
+		return {
+			isError: true,
+			content: [
+				{
+					type: "text" as const,
+					text: `MCP task ${taskId} completed, but its final output is invalid (${error.code}): ${error.message} Inspect the server's saved result before deciding whether to run new work.`,
+				},
+			],
+		};
+	}
+}

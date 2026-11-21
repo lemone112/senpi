@@ -252,7 +252,9 @@ export class McpSessionTasks {
 						if (signal.aborted) return;
 						if (
 							error instanceof McpMrtrError &&
-							(error.code === "MCP_TASK_FAILED" || error.code === "MCP_TASK_CANCELLED")
+							(error.code === "MCP_TASK_FAILED" ||
+								error.code === "MCP_TASK_CANCELLED" ||
+								error.code === "MCP_TASK_INVALID_RESULT")
 						) {
 							pointer.text = error.message;
 						} else {

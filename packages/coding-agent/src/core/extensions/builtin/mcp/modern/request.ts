@@ -149,6 +149,22 @@ export function installModernRequestAdapter(
 			const { safeParse } = await interrupted(loadMcpSdkZodCompat(), operation.signal);
 			// Use the SDK's own Zod identity, including when npm installs another copy for this package.
 			const { ResultSchema } = await interrupted(loadMcpSdkTypes(), operation.signal);
+			const completeResult = (result: Record<string, unknown>, taskId?: string): SchemaOutput<T> => {
+				const invalid = () =>
+					new McpMrtrError(
+						taskId === undefined ? "MCP_MRTR_INVALID_RESULT" : "MCP_TASK_INVALID_RESULT",
+						undefined,
+						taskId,
+					);
+				if (
+					(own(result, "resultType") && result.resultType !== "complete") ||
+					["requestState", "inputRequests", "inputResponses"].some((key) => own(result, key))
+				)
+					throw invalid();
+				const parsed = safeParse(schema, result);
+				if (!parsed.success) throw invalid();
+				return parsed.data;
+			};
 			const requestCapabilities = () => ({
 				...((origin?.privateFormsEnforced ? origin.privateForm?.ready() : !presentationLost && origin?.presentation)
 					? { elicitation: {} }
@@ -275,11 +291,11 @@ export function installModernRequestAdapter(
 				} finally {
 					operation.signal.removeEventListener("abort", forward);
 				}
-				let type = own(result, "resultType") ? result.resultType : "complete";
+				const type = own(result, "resultType") ? result.resultType : "complete";
 				if (type === "task" || observingTask) {
 					if (!tasksEnabled || (request.method !== "tools/call" && !observingTask))
 						throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
-					parseMcpTask(result, observingTask ? origin?.observingTaskId : undefined);
+					const task = parseMcpTask(result, observingTask ? origin?.observingTaskId : undefined);
 					// The tool boundary persists the handle before exposing an acceptance receipt.
 					if (!observingTask && origin?.acceptTask) {
 						const accepted = safeParse(schema, result);
@@ -342,17 +358,13 @@ export function installModernRequestAdapter(
 							);
 						},
 					});
-					type = own(result, "resultType") ? result.resultType : "complete";
-					if (type !== "complete") throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
+					check();
+					// A successful follow returns only a completed task's final result. Keep
+					// that terminal identity through every remaining envelope/schema check.
+					return completeResult(result, task.taskId);
 				}
 				check();
-				if (type === "complete") {
-					if (["requestState", "inputRequests", "inputResponses"].some((key) => own(result, key)))
-						throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
-					const parsed = safeParse(schema, result);
-					if (!parsed.success) throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
-					return parsed.data;
-				}
+				if (type === "complete") return completeResult(result);
 				if (type !== "input_required" || !capableMethods.has(request.method))
 					throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
 				if (round >= MAX_MCP_MRTR_ROUNDS) throw new McpMrtrError("MCP_MRTR_ROUND_LIMIT");

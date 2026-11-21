@@ -20,3 +20,5 @@ before admission, final-output validation boundary, and native receipt deduplica
 Observation bounds concurrent wire reads, so long-lived tasks cannot starve later
 completed tasks. Configured request timeouts still apply to each read. The Windows
 lint ratchet invokes the installed JavaScript entry point with bounded path batches.
+Completed tasks with invalid tool output produce one diagnostic delivery instead
+of retrying the final result indefinitely; temporary reads still recover.

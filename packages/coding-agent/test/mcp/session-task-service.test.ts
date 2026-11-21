@@ -13,7 +13,14 @@ afterEach(async () => {
 });
 
 describe("session task acceptance at the MCP service boundary", () => {
-	it.each([false, true])("requires a persistent session file (persistent: %s)", async (persistent) => {
+	it.each([
+		{ persistent: false, resultKind: "valid" },
+		{ persistent: true, resultKind: "valid" },
+		{ persistent: true, resultKind: "invalid schema" },
+		{ persistent: true, resultKind: "invalid content" },
+		{ persistent: true, resultKind: "missing result" },
+		{ persistent: true, resultKind: "read failure" },
+	])("handles $resultKind with a persistent session file: $persistent", async ({ persistent, resultKind }) => {
 		const root = makeRoot("session-task-service", cleanup);
 		const task = {
 			resultType: "task",
@@ -25,10 +32,14 @@ describe("session task acceptance at the MCP service boundary", () => {
 			pollIntervalMs: 1,
 		};
 		const script = new MrtrScript([task]);
+		if (resultKind === "invalid schema") script.outputSchema = { type: "object", required: ["answer"] };
+		let reads = 0;
 		const originalReply = script.reply.bind(script);
 		vi.spyOn(script, "reply").mockImplementation((request) => {
 			if (request.method === "tasks/get") {
 				script.requests.push(request);
+				if (++reads === 1 && resultKind === "read failure")
+					return { jsonrpc: "2.0", id: request.id, error: { code: -32603, message: "temporary read failure" } };
 				return {
 					jsonrpc: "2.0",
 					id: request.id,
@@ -36,7 +47,14 @@ describe("session task acceptance at the MCP service boundary", () => {
 						...task,
 						resultType: "complete",
 						status: "completed",
-						result: { content: [{ type: "text", text: "service final output" }] },
+						result:
+							resultKind === "missing result"
+								? undefined
+								: {
+										content: [
+											{ type: "text", text: resultKind === "invalid content" ? 42 : "service final output" },
+										],
+									},
 					},
 				};
 			}
@@ -109,7 +127,24 @@ describe("session task acceptance at the MCP service boundary", () => {
 		if (persistent) {
 			expect(textContent(result)).toContain("accepted");
 			expect(persist).toHaveBeenCalledOnce();
-			await vi.waitFor(() => expect(admit).toHaveBeenCalledOnce());
+			if (resultKind === "read failure") {
+				await vi.waitFor(() => expect(reads).toBe(1));
+				expect(admit).not.toHaveBeenCalled();
+			}
+			await vi.waitFor(() => expect(admit).toHaveBeenCalledOnce(), { timeout: 5000 });
+			expect(admit.mock.calls[0][0]).toMatchObject({ text: expect.stringContaining("service-task") });
+			expect(admit.mock.calls[0][0]).toMatchObject({
+				text: expect.stringContaining(
+					resultKind === "invalid schema"
+						? "MCP_OUTPUT_SCHEMA_MISMATCH"
+						: resultKind === "invalid content"
+							? "MCP_MRTR_INVALID_RESULT"
+							: resultKind === "missing result"
+								? "Task completed, but its final result is invalid"
+								: "service final output",
+				),
+			});
+			expect(reads).toBe(resultKind === "read failure" ? 2 : 1);
 			expect(requests.mock.calls.find(([request]) => request.method === "tasks/get")?.[2]).toMatchObject({
 				timeout: 1000,
 			});
