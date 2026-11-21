@@ -10,8 +10,13 @@ const messages = {
 	MCP_MRTR_TIMEOUT: "Request exceeded its operation deadline.",
 	MCP_MRTR_TRANSPORT_FAILED: "Request could not complete; it was not automatically replayed.",
 	MCP_TASK_TIMEOUT: "Task exceeded SENPI_MCP_TASK_TIMEOUT_MS; cancellation was requested.",
+	MCP_TASK_OBSERVATION_TIMEOUT: "Task observation will resume; accepted work was not cancelled.",
 	MCP_TASK_FAILED: "Task failed with a JSON-RPC error.",
+	MCP_TASK_INVALID_RESULT:
+		"Task completed, but its final result is invalid. Inspect the server's saved result before deciding whether to run new work.",
 	MCP_TASK_CANCELLED: "Task was cancelled by the server.",
+	MCP_TASK_PERSIST_FAILED:
+		"Task was accepted, but its recovery reference could not be persisted. Do not resubmit the operation.",
 } as const;
 
 export class McpMrtrError extends Error {
@@ -19,12 +24,14 @@ export class McpMrtrError extends Error {
 	readonly retriable = false;
 	readonly code: keyof typeof messages;
 	readonly remoteCode?: number;
+	readonly taskId?: string;
 	constructor(code: keyof typeof messages, remoteCode?: number, taskId?: string) {
 		super(
 			`${taskId === undefined ? "" : `Task ${taskId}: `}${messages[code]}${remoteCode === undefined ? "" : ` (remote code ${remoteCode})`}`,
 		);
 		this.code = code;
 		this.remoteCode = remoteCode;
+		this.taskId = taskId;
 		this.name = "McpMrtrError";
 	}
 }

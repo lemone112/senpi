@@ -81,7 +81,7 @@ export function deriveModernHeaders(request: ModernRequest): Record<string, stri
 	const name =
 		request.method === "resources/read"
 			? request.params.uri
-			: request.method === "tools/call" || request.method === "prompts/get"
+			: request.method === "tools/call" || request.method === "prompts/get" || request.method === "events/poll"
 				? request.params.name
 				: ["tasks/get", "tasks/update", "tasks/cancel"].includes(request.method)
 					? request.params.taskId

@@ -17,7 +17,7 @@ import { McpMrtrError } from "./errors.ts";
 import { queuedForm } from "./consent-queue.ts";
 import { parseInputs } from "./inputs.ts";
 import { ParameterHeaderValidationError } from "./parameter-headers.ts";
-import { followMcpTask, MCP_TASK_EXTENSION, mcpTaskTimeoutMs } from "./tasks.ts";
+import { followMcpTask, MCP_TASK_EXTENSION, mcpTaskTimeoutMs, parseMcpTask } from "./tasks.ts";
 
 export const MAX_MCP_MRTR_ROUNDS = 8;
 const capableMethods = new Set(["tools/call", "resources/read", "prompts/get"]);
@@ -84,7 +84,10 @@ export function installModernRequestAdapter(
 		const credential = readCredential();
 		const serverExtensions = client.getServerCapabilities()?.extensions;
 		const tasksEnabled = isRecord(serverExtensions) && isRecord(serverExtensions[MCP_TASK_EXTENSION]);
-		const taskTimeout = tasksEnabled && request.method === "tools/call" ? mcpTaskTimeoutMs() : 0;
+		const observingTask = origin?.observingTaskId !== undefined && request.method === "tasks/get";
+		const sendRequest = <R>(send: () => Promise<R>, signal: AbortSignal): Promise<R> =>
+			observingTask && origin?.taskRequest ? origin.taskRequest(send, signal) : send();
+		const taskTimeout = tasksEnabled && (request.method === "tools/call" || observingTask) ? mcpTaskTimeoutMs() : 0;
 		let authority: string | undefined;
 		let authorityCaptured = false;
 		const controller = origin?.connection;
@@ -146,6 +149,22 @@ export function installModernRequestAdapter(
 			const { safeParse } = await interrupted(loadMcpSdkZodCompat(), operation.signal);
 			// Use the SDK's own Zod identity, including when npm installs another copy for this package.
 			const { ResultSchema } = await interrupted(loadMcpSdkTypes(), operation.signal);
+			const completeResult = (result: Record<string, unknown>, taskId?: string): SchemaOutput<T> => {
+				const invalid = () =>
+					new McpMrtrError(
+						taskId === undefined ? "MCP_MRTR_INVALID_RESULT" : "MCP_TASK_INVALID_RESULT",
+						undefined,
+						taskId,
+					);
+				if (
+					(own(result, "resultType") && result.resultType !== "complete") ||
+					["requestState", "inputRequests", "inputResponses"].some((key) => own(result, key))
+				)
+					throw invalid();
+				const parsed = safeParse(schema, result);
+				if (!parsed.success) throw invalid();
+				return parsed.data;
+			};
 			const requestCapabilities = () => ({
 				...((origin?.privateFormsEnforced ? origin.privateForm?.ready() : !presentationLost && origin?.presentation)
 					? { elicitation: {} }
@@ -245,32 +264,44 @@ export function installModernRequestAdapter(
 				let result: Record<string, unknown>;
 				try {
 					check();
-					result = await sdkRequest({ method: request.method, params: outgoing }, ResultSchema, {
-						...sdkOptions,
-						signal: attempt.signal,
-						timeout: Math.min(timeout, remaining),
-						maxTotalTimeout: remaining,
-						onprogress: sdkOptions.onprogress
-							? (progress) => {
-									check();
-									if (
-										!Number.isFinite(progress.progress) ||
-										(progress.total !== undefined && !Number.isFinite(progress.total))
-									)
-										return;
-									sdkOptions.onprogress?.({
-										progress: progress.progress,
-										...(progress.total === undefined ? {} : { total: progress.total }),
-									});
-								}
-							: undefined,
-					});
+					result = await sendRequest(
+						() =>
+							sdkRequest({ method: request.method, params: outgoing }, ResultSchema, {
+								...sdkOptions,
+								signal: attempt.signal,
+								timeout: Math.min(timeout, remaining),
+								maxTotalTimeout: remaining,
+								onprogress: sdkOptions.onprogress
+									? (progress) => {
+											check();
+											if (
+												!Number.isFinite(progress.progress) ||
+												(progress.total !== undefined && !Number.isFinite(progress.total))
+											)
+												return;
+											sdkOptions.onprogress?.({
+												progress: progress.progress,
+												...(progress.total === undefined ? {} : { total: progress.total }),
+											});
+										}
+									: undefined,
+							}),
+						attempt.signal,
+					);
 				} finally {
 					operation.signal.removeEventListener("abort", forward);
 				}
-				let type = own(result, "resultType") ? result.resultType : "complete";
-				if (type === "task") {
-					if (!tasksEnabled || request.method !== "tools/call") throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
+				const type = own(result, "resultType") ? result.resultType : "complete";
+				if (type === "task" || observingTask) {
+					if (!tasksEnabled || (request.method !== "tools/call" && !observingTask))
+						throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
+					const task = parseMcpTask(result, observingTask ? origin?.observingTaskId : undefined);
+					// The tool boundary persists the handle before exposing an acceptance receipt.
+					if (!observingTask && origin?.acceptTask) {
+						const accepted = safeParse(schema, result);
+						if (!accepted.success) throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
+						return accepted.data;
+					}
 					// The ordinary MRTR deadline ends at the handle, not at the final task result.
 					clock.cancel(timer);
 					deadline = Infinity;
@@ -279,6 +310,7 @@ export function installModernRequestAdapter(
 						clock,
 						signal: operation.signal,
 						timeoutMs: taskTimeout,
+						cancelOnAbort: !observingTask,
 						inputs: collectInputs,
 						progress: (task) => {
 							check();
@@ -286,6 +318,7 @@ export function installModernRequestAdapter(
 								progress: 0,
 								message: `MCP task ${task.taskId}: ${task.status}${task.statusMessage ? ` - ${task.statusMessage}` : ""}`,
 							});
+							return origin?.taskProgress?.(task);
 						},
 						send: async (method, taskParams, signal) => {
 							if (signal) await interrupted(resolveAuthority(), signal);
@@ -303,35 +336,35 @@ export function installModernRequestAdapter(
 								if (signal) check();
 							};
 							guard();
-							return await sdkRequest(
-								{
-									method,
-									params: {
-										...taskParams,
-										_meta: { ...metadata, [capabilitiesKey]: requestCapabilities() },
-										[modernDispatchGuard]: guard,
-									},
-								},
-								ResultSchema,
-								{
-									timeout,
-									maxTotalTimeout: timeout,
-									signal,
-								},
+							return await sendRequest(
+								() =>
+									sdkRequest(
+										{
+											method,
+											params: {
+												...taskParams,
+												_meta: { ...metadata, [capabilitiesKey]: requestCapabilities() },
+												[modernDispatchGuard]: guard,
+											},
+										},
+										ResultSchema,
+										{
+											timeout,
+											maxTotalTimeout: timeout,
+											signal,
+										},
+									),
+								signal ?? operation.signal,
 							);
 						},
 					});
-					type = own(result, "resultType") ? result.resultType : "complete";
-					if (type !== "complete") throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
+					check();
+					// A successful follow returns only a completed task's final result. Keep
+					// that terminal identity through every remaining envelope/schema check.
+					return completeResult(result, task.taskId);
 				}
 				check();
-				if (type === "complete") {
-					if (["requestState", "inputRequests", "inputResponses"].some((key) => own(result, key)))
-						throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
-					const parsed = safeParse(schema, result);
-					if (!parsed.success) throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
-					return parsed.data;
-				}
+				if (type === "complete") return completeResult(result);
 				if (type !== "input_required" || !capableMethods.has(request.method))
 					throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
 				if (round >= MAX_MCP_MRTR_ROUNDS) throw new McpMrtrError("MCP_MRTR_ROUND_LIMIT");

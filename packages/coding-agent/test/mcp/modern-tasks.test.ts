@@ -81,7 +81,7 @@ describe("modern negotiated task lifecycle", () => {
 		await rejected;
 		expect(f.clock.timers.size).toBe(0);
 	});
-	it("terminates input-required tasks without a presenter, never fabricating a decline", async () => {
+	it("stops observing input-required tasks without a presenter and preserves accepted work", async () => {
 		const f = await fixture(
 			[
 				task("input_required", { resultType: "task" }),
@@ -98,11 +98,7 @@ describe("modern negotiated task lifecycle", () => {
 		await working.promise;
 		f.clock.advance(400_000);
 		await rejected;
-		expect(f.transport.calls.map((call) => "method" in call && call.method)).toEqual([
-			"tools/call",
-			"tasks/get",
-			"tasks/cancel",
-		]);
+		expect(f.transport.calls.map((call) => "method" in call && call.method)).toEqual(["tools/call", "tasks/get"]);
 		expect(JSON.stringify(f.transport.calls)).not.toContain("decline");
 		expect(f.clock.timers.size).toBe(0);
 	});
@@ -229,22 +225,22 @@ describe("modern negotiated task lifecycle", () => {
 		expect(f.client.onclose).toBe(prior);
 		expect(f.transport.calls).toHaveLength(1);
 	});
-	it("a stalled poll has its own request timeout and cancels the task without replaying tools/call", async () => {
+	it("a stalled poll preserves its accepted task identity without cancelling or replaying tools/call", async () => {
 		const f = await fixture([handle(), undefined, {}], true);
 		const scheduled = f.clock.nextScheduled(400_000);
 		const pending = f.client.callTool({ name: "test" }, undefined, { timeout: 1000 });
-		const rejected = expect(pending).rejects.toMatchObject({ code: "MCP_MRTR_TRANSPORT_FAILED", retriable: false });
+		const rejected = expect(pending).rejects.toMatchObject({
+			code: "MCP_MRTR_TRANSPORT_FAILED",
+			retriable: false,
+			taskId: "task-4195",
+		});
 		await scheduled;
 		const received = (f.transport.received = Promise.withResolvers<void>());
 		f.clock.advance(400_000);
 		await received.promise;
 		await vi.advanceTimersByTimeAsync(1000);
 		await rejected;
-		expect(f.transport.calls.map((call) => "method" in call && call.method)).toEqual([
-			"tools/call",
-			"tasks/get",
-			"tasks/cancel",
-		]);
+		expect(f.transport.calls.map((call) => "method" in call && call.method)).toEqual(["tools/call", "tasks/get"]);
 		expect(f.clock.timers.size).toBe(0);
 	});
 	it("the cap interrupts pending task consent without leaking its timers", async () => {

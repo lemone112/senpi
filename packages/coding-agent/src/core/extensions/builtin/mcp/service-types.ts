@@ -89,7 +89,7 @@ export type McpSessionContext = Pick<ExtensionContext, "cwd" | "isProjectTrusted
 	 * requirement narrow lets tests pass a two-line fake.
 	 */
 	sessionManager?: Pick<ExtensionContext["sessionManager"], "getEntries"> &
-		Partial<Pick<ExtensionContext["sessionManager"], "getSessionId">>;
+		Partial<Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionFile">>;
 	/**
 	 * Extension-declared MCP servers. Read on every attach so reattach/reload
 	 * paths pick up the current declarations without caching them in the MCP

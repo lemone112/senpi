@@ -106,11 +106,14 @@ export const lint = (root) => {
   const diagnostics = [];
   let skipped = 0;
   // Batches keep each argv under the OS limit.
-  for (let start = 0; start < files.length; start += 2000) {
-    const batch = files.slice(start, start + 2000);
+  const batchSize = NodeProcess.platform === "win32" ? 100 : 2000;
+  for (let start = 0; start < files.length; start += batchSize) {
+    const batch = files.slice(start, start + batchSize);
     // --no-ignore: no .eslintignore entry, --ignore-path or --ignore-pattern may hide a file and drop
     // its counts silently. The ratchet's only exclusion is its own file filter above.
-    const result = run(root, NodePath.join(root, "node_modules/.bin/oxlint"), [
+    // npm/Bun install .cmd/.exe shims on Windows, not an executable extensionless .bin path.
+    const result = run(root, NodeProcess.execPath, [
+      NodePath.join(root, "node_modules/oxlint/bin/oxlint"),
       "--no-ignore",
       "-c",
       CONFIG,
@@ -119,7 +122,7 @@ export const lint = (root) => {
       ...batch,
     ]);
     if (result.error !== undefined || (result.status !== 0 && result.status !== 1))
-      throw new Error(`oxlint failed (status ${String(result.status)}): ${result.stderr}`);
+      throw new Error(`oxlint failed (status ${String(result.status)}): ${result.error?.message ?? result.stderr}`);
     const parsed = JSON.parse(result.stdout);
     diagnostics.push(...parsed.diagnostics);
     // --no-ignore does not reach a config's ignorePatterns, so a file oxlint skips is caught here.
