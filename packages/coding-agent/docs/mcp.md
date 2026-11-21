@@ -106,17 +106,38 @@ tools stay registered; the next call reconnects transparently). Default `10`.
 Per-request timeout. Default `30000`.
 
 ### `SENPI_MCP_TASK_TIMEOUT_MS` (environment setting)
-Maximum task lifetime in milliseconds, separate from `requestTimeoutMs`.
+Maximum foreground task lifetime in milliseconds, separate from `requestTimeoutMs`.
 Default `1800000` (30 minutes); set a positive integer up to `2147483647`.
 Applies only to tool calls on modern servers advertising the
-`io.modelcontextprotocol/tasks` extension. After a task handle arrives, the tool
-row stays pending and displays task status until completion, failure, cancellation,
-or this cap. Each poll has its own `requestTimeoutMs` timeout and follows the
-server's `pollIntervalMs`; absent that hint, polling backs off from 1 to 30 seconds.
-Esc requests `tasks/cancel`. Reaching the cap also requests cancellation and fails
-with an error naming the task ID and this setting. Cancellation is cooperative;
-it does not guarantee that the server stops its work. Tasks are not resumed after
-a restart. Ordinary non-task calls retain their existing whole-operation deadline.
+`io.modelcontextprotocol/tasks` extension. In interactive TUI and RPC sessions,
+the accepted task ID is written to session history before the tool returns an
+acceptance receipt. Observation continues outside model turns, under the current
+authorized server configuration. Reopening that session resumes the same task;
+forking a session does not take over its tasks. A temporary read failure, Stop,
+reload, or quit never resubmits or cancels accepted background work.
+
+Completion enters the session's normal follow-up admission, including its Stop
+and interruption holds. A queued message is not yet delivered: the native
+`session_control_delivery` transcript receipt confirms delivery and prevents
+duplicates after restart. The recovery entry contains only the task reference,
+server configuration identity, and original output contract, never credentials
+or a second copy of the server's result. The server must retain its task long
+enough for the session to recover it. Unavailable or changed configurations leave
+the reference pending instead of sending it to a different server.
+
+Changed nonempty task status messages also enter native follow-up admission. A
+server can request browser participation in an authorized status message while
+its task continues working; this does not create a form or require a second Done
+action. Status recovery stores only the message digest and episode number. A
+repeated poll does not repeat the notice, while the same message after a cleared
+or changed state begins a new episode. Private text stays in the authorized chat.
+
+Print/JSON and hosts without a persistent session keep the tool pending until
+completion. Their caller cancellation or this cap requests `tasks/cancel`;
+cancellation is cooperative. For background observation, the cap renews the read
+attempt without cancelling work. Each poll uses its own request timeout and the
+server's `pollIntervalMs`; without that hint polling backs off from 1 to 30 seconds.
+Ordinary non-task calls retain their existing whole-operation deadline.
 
 ### `connectTimeoutMs`
 Connect + initialize handshake timeout. Default `15000`.

@@ -4,6 +4,8 @@ import { z } from "zod";
 import { loadMcpSdkTypes } from "../sdk.lazy.ts";
 import type { McpJsonSchema } from "../tool-contracts.ts";
 import { McpMrtrError } from "./errors.ts";
+import { physicalMcpClient, takeMcpRequestOrigin } from "../request-origin.ts";
+import { parseMcpTask } from "./tasks.ts";
 import { compileModernSchema, hasSupportedModernToolSchemas, McpToolSchemaError } from "./tool-schema.ts";
 
 const jsonSchema = z.union([z.boolean(), z.record(z.string(), z.json())]);
@@ -47,8 +49,36 @@ export async function callModernTool(
 	options?: RequestOptions,
 ) {
 	const { CallToolResultSchema, ResultSchema } = await loadMcpSdkTypes();
-	const validate = outputSchema === undefined ? undefined : compileModernSchema(outputSchema);
+	const { origin } = takeMcpRequestOrigin(options, physicalMcpClient(client));
 	const raw = await client.request({ method: "tools/call", params }, ResultSchema, options);
+	if (raw.resultType === "task") {
+		const task = parseMcpTask(raw);
+		if (!origin?.acceptTask) throw new McpMrtrError("MCP_MRTR_INVALID_RESULT", undefined, task.taskId);
+		try {
+			await origin.acceptTask(task, params.name, outputSchema);
+		} catch {
+			throw new McpMrtrError("MCP_TASK_PERSIST_FAILED", undefined, task.taskId);
+		}
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: `MCP task ${task.taskId} accepted by ${origin.serverLabel}. The session is observing it in the background and will receive the result. Do not submit the operation again.`,
+				},
+			],
+		};
+	}
+	return validateModernToolResult(raw, outputSchema, CallToolResultSchema);
+}
+
+/** Acceptance has its own contract; only the eventual tool output satisfies outputSchema. */
+export async function validateModernToolResult(
+	raw: Record<string, unknown>,
+	outputSchema: McpJsonSchema | undefined,
+	contentSchema?: Awaited<ReturnType<typeof loadMcpSdkTypes>>["CallToolResultSchema"],
+) {
+	const CallToolResultSchema = contentSchema ?? (await loadMcpSdkTypes()).CallToolResultSchema;
+	const validate = outputSchema === undefined ? undefined : compileModernSchema(outputSchema);
 	const parsed = callResult.safeParse(raw);
 	if (!parsed.success) throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
 	const content = CallToolResultSchema.shape.content.optional().safeParse(raw.content);

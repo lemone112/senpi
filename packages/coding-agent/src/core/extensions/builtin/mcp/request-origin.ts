@@ -5,6 +5,8 @@ import type { McpFormPresentation } from "../../../mcp-form-types.ts";
 import type { ExtensionUIContext } from "../../types.ts";
 import type { ServerConnection } from "./connection.ts";
 import { McpMrtrError } from "./modern/errors.ts";
+import type { McpTask, McpTaskProgress } from "./modern/tasks.ts";
+import type { McpJsonSchema } from "./tool-contracts.ts";
 
 const originOption = Symbol("mcp-request-origin");
 const origins = new WeakSet<object>();
@@ -29,6 +31,14 @@ export interface McpRequestOrigin {
 	readonly elicitationUi?: () => Pick<ExtensionUIContext, "input" | "select"> | undefined;
 	readonly isCurrent: () => boolean;
 	readonly resolveAuthority: (signal: AbortSignal) => Promise<unknown>;
+	/** Session custody is established before the tool reports accepted work. */
+	readonly acceptTask?: (task: McpTask, tool: string, outputSchema: McpJsonSchema | undefined) => Promise<void>;
+	/** An existing task observed by the host, without the originating model turn. */
+	readonly observingTaskId?: string;
+	/** Bound network observations, not the lifetime of independent remote tasks. */
+	readonly taskRequest?: <T>(operation: () => Promise<T>, signal: AbortSignal) => Promise<T>;
+	/** Session-owned status notices do not require a form response. */
+	readonly taskProgress?: (task: McpTaskProgress) => Promise<void>;
 }
 
 /** A request's origin, resolved for the context of the call that makes it (absent for prompts and resources). */

@@ -20,12 +20,16 @@ import type { McpServerDeclaredConfig, ResolvedMcpConfig, ResolvedMcpServer } fr
 import type { ServerConnection } from "./connection.ts";
 import type { McpSessionRegistration } from "./expose/session.ts";
 import type { McpServerExposureStatus } from "./expose/status.ts";
-import { cleanupMcpOutputArtifacts, McpOutputArtifacts } from "./guard/output-guard.ts";
+import { applyMcpOutputGuard, cleanupMcpOutputArtifacts, McpOutputArtifacts } from "./guard/output-guard.ts";
 import { HostMcpRegistry } from "./host-registry.ts";
 import { refreshMcpInstructionsForSession } from "./instructions.ts";
 import { createMcpLogger } from "./log.ts";
 import { prepareProjectSkillServer } from "./project-skill-policy.ts";
-import type { McpRequestOrigin } from "./request-origin.ts";
+import { createMcpRequestOrigin, mcpRequestOptions, type McpRequestOrigin } from "./request-origin.ts";
+import { isModernMcpClient } from "./modern/request.ts";
+import { validateModernToolResult } from "./modern/tools.ts";
+import { McpSessionTasks } from "./session-tasks.ts";
+import { loadMcpSdkTypes } from "./sdk.lazy.ts";
 import { reconnectMcpNow } from "./reconnect.ts";
 import type { McpResourceServer } from "./resources.ts";
 import { createMcpSessionConnection, disposeEntryConnection } from "./service-connection.ts";
@@ -69,7 +73,7 @@ type ListedResourceTemplate = Awaited<ReturnType<Client["listResourceTemplates"]
 type McpElicitationUi = Pick<ExtensionUIContext, "input" | "select" | "confirm"> &
 	Partial<Pick<ExtensionUIContext, "notify">>;
 type McpToolRegistrar = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools" | "registerTool"> &
-	Partial<Pick<ExtensionAPI, "events">>;
+	Partial<Pick<ExtensionAPI, "events" | "appendEntry" | "session" | "lifecycle">>;
 
 /**
  * One live session's binding to the service (#2514): the session's own extension API and
@@ -88,6 +92,7 @@ interface McpSessionBinding extends scopes.McpScopedBinding {
 	registration: McpSessionRegistration | undefined;
 	/** The session id read at attach, while the context is live: a released session's context may already be stale. */
 	readonly sessionId: string | undefined;
+	tasks?: McpSessionTasks;
 }
 
 /** A session's resolved config with the context and options that declared it; a binding is one. */
@@ -343,6 +348,78 @@ export class McpService {
 		// Re-inserting keeps the most recent attach last, which is what a caller naming no session gets.
 		this.#bindings.delete(pi);
 		this.#bindings.set(pi, binding);
+		const sessionId = binding.sessionId;
+		const host =
+			pi.appendEntry && pi.session && pi.lifecycle
+				? { appendEntry: pi.appendEntry.bind(pi), session: pi.session, lifecycle: pi.lifecycle }
+				: undefined;
+		if (
+			host &&
+			sessionId &&
+			owner.context.sessionManager?.getSessionFile?.() &&
+			(owner.context.mode === "tui" || owner.context.mode === "rpc")
+		) {
+			binding.tasks = new McpSessionTasks({
+				host,
+				sessionId,
+				entries: () => owner.context.sessionManager?.getEntries() ?? [],
+				signal: binding.lifetime.signal,
+				onError: (error) => {
+					if (!binding.lifetime.signal.aborted)
+						createMcpLogger("tasks").warn("MCP task observation will resume without resubmitting work", {
+							error: String(error),
+						});
+				},
+				observe: async (reference, signal) => {
+					const entry = this.#entryForName(reference.server);
+					if (
+						!entry ||
+						entry.configHash !== reference.configHash ||
+						(entry.generationHash ?? entry.configHash) !== reference.generationHash
+					)
+						return;
+					if (!this.#requestOrigin(binding, entry).isCurrent()) return;
+					await entry.connection.connect();
+					const origin = this.#requestOrigin(binding, entry);
+					if (!isModernMcpClient(entry.connection.client)) return;
+					const { ResultSchema } = await loadMcpSdkTypes();
+					const raw = await entry.connection.client.request(
+						{ method: "tasks/get", params: { taskId: reference.taskId } },
+						ResultSchema,
+						mcpRequestOptions(
+							createMcpRequestOrigin({
+								...origin,
+								acceptTask: undefined,
+								observingTaskId: reference.taskId,
+								taskProgress: async (task) =>
+									binding.tasks?.progress(reference, task, async (text) => {
+										const content = await applyMcpOutputGuard([{ type: "text", text }], {
+											server: reference.server,
+											agentDir: binding.options.agentDir,
+											artifacts: this.#outputArtifacts,
+											outputGuard: binding.config.settings.outputGuard,
+										});
+										return content
+											.map((block) => (block.type === "text" ? block.text : JSON.stringify(block)))
+											.join("\n");
+									}),
+								taskRequest: (operation, activeSignal) =>
+									binding.tasks ? binding.tasks.request(operation, activeSignal) : operation(),
+							}),
+							{ signal, timeout: binding.config.servers[reference.server]?.config?.requestTimeoutMs },
+						),
+					);
+					const result = await validateModernToolResult(raw, reference.outputSchema);
+					const content = await applyMcpOutputGuard([{ type: "text", text: JSON.stringify(result) }], {
+						server: reference.server,
+						agentDir: binding.options.agentDir,
+						artifacts: this.#outputArtifacts,
+						outputGuard: binding.config.settings.outputGuard,
+					});
+					return content.map((block) => (block.type === "text" ? block.text : JSON.stringify(block))).join("\n");
+				},
+			});
+		}
 		return binding;
 	}
 
@@ -1210,7 +1287,7 @@ export class McpService {
 		entry: McpConnectionEntry,
 		caller?: { readonly sessionManager?: object },
 	): McpRequestOrigin {
-		return scopes.scopedRequestOrigin(
+		const origin = scopes.scopedRequestOrigin(
 			binding,
 			entry,
 			caller,
@@ -1223,6 +1300,22 @@ export class McpService {
 				entry.isCurrent?.() !== false &&
 				entry.credentialsCurrent?.() !== false,
 		);
+		const tasks = binding.tasks;
+		if (!tasks || (caller?.sessionManager && caller.sessionManager !== binding.context.sessionManager)) return origin;
+		return createMcpRequestOrigin({
+			...origin,
+			acceptTask: (task, tool, outputSchema) =>
+				tasks.accept(
+					{
+						server: entry.name,
+						configHash: entry.configHash,
+						generationHash: entry.generationHash ?? entry.configHash,
+						tool,
+						...(outputSchema === undefined ? {} : { outputSchema }),
+					},
+					task,
+				),
+		});
 	}
 
 	getMcpElicitationUi(): McpElicitationUi | undefined {

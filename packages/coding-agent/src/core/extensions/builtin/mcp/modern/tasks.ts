@@ -17,13 +17,15 @@ export function mcpTaskTimeoutMs(): number {
 	return value;
 }
 
-interface Task extends Record<string, unknown> {
+export interface McpTask extends Record<string, unknown> {
 	taskId: string;
 	status: "working" | "input_required" | "completed" | "cancelled" | "failed";
 	pollIntervalMs?: number;
 }
 
-function parseTask(value: Record<string, unknown>, id?: string): Task {
+export type McpTaskProgress = { taskId: string; status: string; statusMessage?: string };
+
+export function parseMcpTask(value: Record<string, unknown>, id?: string): McpTask {
 	if (
 		typeof value.taskId !== "string" ||
 		value.taskId.length === 0 ||
@@ -37,7 +39,7 @@ function parseTask(value: Record<string, unknown>, id?: string): Task {
 		(value.statusMessage !== undefined && typeof value.statusMessage !== "string")
 	)
 		throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
-	return value as Task;
+	return value as McpTask;
 }
 
 /** Polling belongs to the originating request, never to the shared physical client. */
@@ -47,15 +49,21 @@ export async function followMcpTask(
 		clock: McpClock;
 		signal: AbortSignal;
 		timeoutMs: number;
+		/** A host observer ending never cancels the server's accepted work. */
+		cancelOnAbort?: boolean;
 		send: (method: string, params: Record<string, unknown>, signal?: AbortSignal) => Promise<Record<string, unknown>>;
 		inputs: (result: Record<string, unknown>, signal: AbortSignal) => Promise<Record<string, MrtrInputResponse>>;
-		progress: (task: { taskId: string; status: string; statusMessage?: string }) => void;
+		progress: (task: McpTaskProgress) => void | Promise<void>;
 	},
 ): Promise<Record<string, unknown>> {
-	let task = parseTask(initial);
+	let task = parseMcpTask(initial);
 	const id = task.taskId;
 	const cap = new AbortController();
-	const timeoutError = new McpMrtrError("MCP_TASK_TIMEOUT", undefined, id);
+	const timeoutError = new McpMrtrError(
+		options.cancelOnAbort === false ? "MCP_TASK_OBSERVATION_TIMEOUT" : "MCP_TASK_TIMEOUT",
+		undefined,
+		id,
+	);
 	const deadline = options.clock.now() + options.timeoutMs;
 	const timer = options.clock.schedule(() => cap.abort(timeoutError), options.timeoutMs);
 	const signal = AbortSignal.any([options.signal, cap.signal]);
@@ -80,11 +88,12 @@ export async function followMcpTask(
 				terminal = true;
 				throw new McpMrtrError("MCP_TASK_CANCELLED", undefined, id);
 			}
-			options.progress({
+			const progress = options.progress({
 				taskId: id,
 				status: task.status,
 				...(typeof task.statusMessage === "string" ? { statusMessage: task.statusMessage } : {}),
 			});
+			if (progress) await mcpInterrupted(progress, signal);
 			// CreateTaskResult is only the seed; inputRequests are authoritative on tasks/get.
 			if (task.status === "input_required" && task.resultType !== "task") {
 				parseInputs({ inputRequests: task.inputRequests });
@@ -107,12 +116,19 @@ export async function followMcpTask(
 			const result = await options.send("tasks/get", { taskId: id }, signal);
 			if (result.resultType !== undefined && result.resultType !== "complete")
 				throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
-			task = parseTask(result, id);
+			task = parseMcpTask(result, id);
 			backoff = Math.min(30_000, backoff * 2);
 		}
 	} catch (error) {
-		// A changed owner/credential must never send a task operation with somebody else's authority.
-		if (!terminal && !(error instanceof McpMrtrError && error.code === "MCP_MRTR_CONTEXT_CHANGED")) {
+		// A failed observation does not cancel accepted work. Only the caller's
+		// explicit cancellation or its configured execution cap may request that.
+		// A changed credential must never send an operation with another authority.
+		if (
+			options.cancelOnAbort !== false &&
+			!terminal &&
+			signal.aborted &&
+			!(error instanceof McpMrtrError && error.code === "MCP_MRTR_CONTEXT_CHANGED")
+		) {
 			try {
 				await options.send("tasks/cancel", { taskId: id });
 			} catch {
@@ -120,6 +136,16 @@ export async function followMcpTask(
 			}
 		}
 		if (cap.signal.aborted) throw timeoutError;
+		if (!terminal) {
+			const code = error instanceof McpMrtrError ? error.code : "MCP_MRTR_TRANSPORT_FAILED";
+			const remoteCode =
+				error instanceof McpMrtrError
+					? error.remoteCode
+					: isRecord(error) && typeof error.code === "number"
+						? error.code
+						: undefined;
+			throw new McpMrtrError(code, remoteCode, id);
+		}
 		throw error;
 	} finally {
 		options.clock.cancel(timer);
