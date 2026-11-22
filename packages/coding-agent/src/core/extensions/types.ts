@@ -620,7 +620,7 @@ export interface ExtensionContext {
 	registerRunBackgroundJob?(job: RunBackgroundJob): () => void;
 	/** Whether project-local trust is active for this context. */
 	isProjectTrusted(): boolean;
-	/** The current abort signal, or undefined when the agent is not streaming. */
+	/** The current preparation or agent-run abort signal, or undefined outside either operation. */
 	signal: AbortSignal | undefined;
 	/**
 	 * Invocation-scoped notification that steering is queued. Never a cancellation signal.

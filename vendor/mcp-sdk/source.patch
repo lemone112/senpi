@@ -1,0 +1,3091 @@
+diff --git a/.changeset/listen-extensions.md b/.changeset/listen-extensions.md
+new file mode 100644
+index 00000000..5e4330e1
+--- /dev/null
++++ b/.changeset/listen-extensions.md
+@@ -0,0 +1,12 @@
++---
++'@modelcontextprotocol/server': minor
++---
++
++`createMcpHandler` and `serveStdio` accept `listenExtensions`, so an extension can honor its own fields of the `subscriptions/listen` filter (for example the Tasks extension's `taskIds`) and deliver its notifications on listen streams, while the entry keeps owning ack-first, subscription-ID stamping, keepalive, subscription limits and teardown.
++
++- A `ListenExtension` declares its notification `methods`, `honor(requested, capabilities)` returning the fields it honors from the raw requested filter, `accepts(honored, event)`, and an optional `validate(requested)` that rejects a malformed field with `-32602`.
++- The core filter is honored first against the server's capabilities; an extension cannot add a core field.
++- If `honor()` throws, the ack and the subscription record both leave out that extension's fields, the error is reported through `onerror`, and the core subscription is served as usual.
++- `ServerEvent` gains `{ kind: 'extension'; method; params? }`, published with `handler.notify.extension(method, params)`. On `serveStdio`, an instance's notification whose method an extension declares is routed per subscription and dropped when none accepts it.
++
++New exported types: `ListenExtension`, `ExtensionServerEvent`. `ServerNotifier` gains `extension()`; code that implements `ServerNotifier` itself must add it.
+diff --git a/.changeset/request-scoped-listen.md b/.changeset/request-scoped-listen.md
+new file mode 100644
+index 00000000..948fd941
+--- /dev/null
++++ b/.changeset/request-scoped-listen.md
+@@ -0,0 +1,21 @@
++---
++'@modelcontextprotocol/client': minor
++'@modelcontextprotocol/server': minor
++---
++
++Preserve extension fields in acknowledged listen filters. Add request-scoped
++async `ListenExtension.open` with source publication, cancellation and disposal
++on the existing HTTP/stdio subscription lifetime. Source setup cannot block stdio
++cancellation or deliver before the acknowledged filter.
++
++EOF cancels pending and active sources. Post-acknowledgment output is bounded on
++HTTP and stdio, and cancelled subscriptions cannot emit previously queued output.
++Preserve class-based extension identity and settle blocked stdio writes on close.
++
++Add a stream-scoped client receiver to avoid mixing overlapping filters, and
++let an asynchronous source close its own existing subscription on source loss.
++Late or unknown addressed data frames never fall back to global handlers.
++Synchronous and asynchronous receiver failures close only their subscription.
++Preserve typed protocol errors from source setup. Add source `finish()` so final
++notifications survive acknowledgment and bounded stdio queues; caller cancellation
++continues to discard queued output.
+diff --git a/docs/clients/subscriptions.md b/docs/clients/subscriptions.md
+index e651cd2a..af20418a 100644
+--- a/docs/clients/subscriptions.md
++++ b/docs/clients/subscriptions.md
+@@ -23,7 +23,7 @@ const subscription = await client.listen({
+ console.log('Server honored:', subscription.honoredFilter);
+ ```
+ 
+-`listen()` resolves once the server acknowledges the stream, and returns an `McpSubscription` whose `honoredFilter` is the subset of your filter the server agreed to deliver:
++`listen()` resolves once the server acknowledges the stream, and returns an `McpSubscription` whose `honoredFilter` is the subset of your filter the server agreed to deliver. Extension fields, such as `taskIds`, are preserved as `unknown` values for their extension to validate; the core fields remain schema-validated:
+ 
+ ```
+ Server honored: { toolsListChanged: true, resourceSubscriptions: [ 'config://app' ] }
+@@ -42,13 +42,24 @@ client.setNotificationHandler('notifications/resources/updated', async notificat
+ });
+ ```
+ 
+-Every notification on the stream dispatches through `setNotificationHandler` — the same registration an unsolicited 2025-era notification fires, so register once for either delivery path. When the server publishes a tool change and an update to `config://app`, both handlers fire from the one stream:
++By default every notification on the stream dispatches through `setNotificationHandler` — the same registration an unsolicited 2025-era notification fires, so register once for either delivery path. When the server publishes a tool change and an update to `config://app`, both handlers fire from the one stream:
+ 
+ ```
+ Tools changed: 2
+ Updated config://app [ { uri: 'config://app', text: '{"theme":"dark"}' } ]
+ ```
+ 
++For extension notifications that belong to one specific subscription, pass
++`onNotification` in the options to `listen`. The SDK installs this receiver
++before sending the request and calls it only after acknowledgment, including
++notifications arriving immediately after that acknowledgment. The callback gets
++raw frames for the extension to validate. It replaces global handler dispatch
++for this subscription, so overlapping filters do not duplicate delivery. Late
++data frames addressed to a closed or unknown subscription are discarded without
++global dispatch. A thrown exception or rejected callback promise closes only
++this subscription and calls `onerror`. Async callbacks are observed but are not
++serialized; the consumer controls its own asynchronous work.
++
+ ## Close the stream and react to closure
+ 
+ `close()` tears the stream down. `closed` resolves exactly once with the reason — it never rejects.
+diff --git a/docs/servers/notifications.md b/docs/servers/notifications.md
+index 0d9fc16c..fa4d68c9 100644
+--- a/docs/servers/notifications.md
++++ b/docs/servers/notifications.md
+@@ -104,6 +104,56 @@ The in-memory bus never leaves the process, so one process needs nothing more. R
+ 
+ When forwarding another server's notifications, include their params on the event: `bus.publish({ kind: 'tools_list_changed', params: notification.params })`. The router preserves custom `_meta` and extension params while replacing the subscription ID with the receiving stream's ID. For `resource_updated`, the event's `uri` controls both filtering and the delivered URI.
+ 
++## Deliver extension notifications on listen streams
++
++An extension can add its own fields to the `subscriptions/listen` filter, such as the Tasks extension's `taskIds`. Pass a `ListenExtension` for it in the `listenExtensions` option of `createMcpHandler` or `serveStdio`. It names the notification `methods` it delivers. `honor(requested, capabilities)` returns the fields it honors from the raw requested filter; they appear in the acknowledged filter. `accepts(honored, event)` decides whether one of its events matches a subscription. The optional `validate(requested)` returns a message to reject a malformed field with `-32602`.
++
++Behind `createMcpHandler`, publish with `handler.notify.extension(method, params)`. On `serveStdio`, send the notification from the instance as usual (`server.server.notification({ method, params })`); on a modern connection it is delivered to each subscription that accepts it and dropped otherwise.
++
++The core filter is honored first and an extension cannot add a core field. If `honor()` throws, the subscription is served without that extension's fields and the error goes to `onerror`.
++
++For a source that needs per-request authorization or asynchronous setup, implement
++`open(requested, capabilities, context)` instead of `honor`. Its result supplies
++the accepted `notifications` filter and an optional `dispose` callback. The
++context includes the listen request, HTTP `requestInfo` and verified `authInfo`
++when available, a lifetime `signal`, and `publish(event)` scoped to this one
++subscription. Use the request envelope for client-capability checks; do not treat
++headers or client-declared metadata as verified identity.
++
++Call `context.close()` when that source disconnects or loses authorization.
++Use `context.finish()` after a source has published its final accepted output:
++the SDK delivers acknowledgment and queued notifications before ending the stream.
++Explicit client cancellation still discards queued output, including during finish.
++Protocol errors thrown during source setup retain their code and data; unexpected
++exceptions return a generic internal error.
++This ends only its subscription through the SDK's existing teardown and aborts
++its signal; callers can recover with a new request. Repeated close is harmless.
++
++The SDK reserves capacity while `open` is pending, acknowledges the accepted
++filter, then delivers buffered source notifications through `accepts`. Before
++acknowledgment it retains at most 128 notifications and 1 MiB in total. Overflow
++or failed setup closes the subscription; no partial extension acknowledgment is
++sent. Cancellation, disconnect and server shutdown abort the signal and dispose
++the source. A source that finishes opening after cancellation is disposed too.
++Cleanup promises are observed and errors reported, but cannot delay shutdown.
++
++After acknowledgment, an unread HTTP listen stream is limited to 1 MiB using
++the native stream's byte queue. Overflow discards that queue and disconnects the
++subscription. Stdio serializes listen messages onto the shared wire with at most
++128 messages and 1 MiB pending; a blocked consumer cannot accumulate concurrent
++drain listeners. Overflow closes that connection and aborts its sources. Queued
++messages are dropped when their subscription is cancelled, including if its ID
++is reused. Normal shutdown allows at most one second for graceful close frames;
++already backpressured output closes abruptly. Clients recover through their
++extension's existing read/reconnect path.
++
++Request-scoped sources must publish through `context.publish`, not the shared
++bus or instance notifier: this keeps two callers' subscriptions separate even
++when they use the same request ID or task ID. The SDK still owns one subscription
++record, framing, acknowledgment and teardown. The extension owns source access,
++authorization refresh and source-specific filtering; it must stop or suppress
++delivery when that authority changes.
++
+ ## Recap
+ 
+ - `sendToolListChanged()`, `sendPromptListChanged()`, and `sendResourceListChanged()` push a list-changed notification to connected clients.
+@@ -111,3 +161,4 @@ When forwarding another server's notifications, include their params on the even
+ - `McpServer` advertises `listChanged` as you register; only the low-level `Server` declares it up front.
+ - Behind `createMcpHandler`, publish through `handler.notify`; delivery reaches every open subscription stream that opted in.
+ - One process needs no `bus`; more than one shares a `ServerEventBus`.
++- `listenExtensions` lets an extension honor its own filter fields and deliver its notifications on listen streams.
+diff --git a/packages/client/src/client/client.ts b/packages/client/src/client/client.ts
+index 19bf11d1..3b8298a7 100644
+--- a/packages/client/src/client/client.ts
++++ b/packages/client/src/client/client.ts
+@@ -506,13 +506,14 @@ export interface McpSubscription {
+     /**
+      * The subset of the requested filter the server agreed to honor (from
+      * `notifications/subscriptions/acknowledged`).
++     * Core fields are validated; extensions validate their own additional fields.
+      */
+-    readonly honoredFilter: SubscriptionFilter;
++    readonly honoredFilter: SubscriptionFilter & Readonly<Record<string, unknown>>;
+     /**
+      * Tears the subscription down. Idempotent. Aborts the listen request's
+-     * stream (where the transport supports it) AND sends
+-     * `notifications/cancelled` referencing the listen request id — both,
+-     * always, so close works on any transport.
++     * stream. On modern per-request transports, closing that stream is the
++     * cancellation signal; other transports receive `notifications/cancelled`
++     * referencing only the listen request id.
+      */
+     close(): Promise<void>;
+     /**
+@@ -530,8 +531,21 @@ export interface McpSubscription {
+     readonly closed: Promise<'local' | 'graceful' | 'remote'>;
+ }
+ 
++/** Options for one subscription, including an optional stream-scoped receiver. */
++export type ListenOptions = RequestOptions & {
++    /**
++     * Receive only notifications carrying this active subscription's id, after
++     * acknowledgment. These raw extension frames are not also dispatched to
++     * global notification handlers; the extension validates their payloads.
++     * A thrown exception or rejected promise closes this subscription and
++     * reaches onerror. Async callbacks are observed but not serialized.
++     */
++    onNotification?: (notification: JSONRPCNotification) => void | Promise<void>;
++};
++
+ /** @internal */
+ interface ListenStateEntry {
++    onNotification?: (notification: JSONRPCNotification) => void;
+     /**
+      * The single funnel for the per-listen `opening → open → closed` state
+      * machine. Every transport-level feed source — the `_onnotification` /
+@@ -539,7 +553,9 @@ interface ListenStateEntry {
+      * failure, ack timeout, caller-signal abort, `_resetConnectionState` —
+      * routes through it.
+      */
+-    settle: (outcome: { ack: SubscriptionFilter } | { cause: 'local' | 'graceful' | 'remote'; error?: Error }) => void;
++    settle: (
++        outcome: { ack: SubscriptionFilter & Readonly<Record<string, unknown>> } | { cause: 'local' | 'graceful' | 'remote'; error?: Error }
++    ) => void;
+ }
+ 
+ /**
+@@ -2046,18 +2062,17 @@ export class Client extends Protocol<ClientContext> {
+      * `listen()` is era-transparent for consumers that already register those.
+      *
+      * `close()` tears the subscription down by aborting the listen request's
+-     * `requestSignal` (closes the SSE stream where the transport honors it)
+-     * AND sending `notifications/cancelled` referencing the listen request id
+-     * — both, unconditionally, so any spec-compliant server on any transport
+-     * sees the cancel. No automatic re-listen — call `listen()` again to
+-     * re-establish.
++     * `requestSignal`. On modern per-request transports (Streamable HTTP),
++     * closing the SSE stream is the cancellation signal. Other transports
++     * receive `notifications/cancelled` referencing the listen request id.
++     * No automatic re-listen — call `listen()` again to re-establish.
+      *
+      * On a 2025-era connection this throws a typed
+      * {@linkcode SdkErrorCode.MethodNotSupportedByProtocolVersion} steering to
+      * `resources/subscribe` and `ClientOptions.listChanged` (the legacy
+      * unsolicited delivery model still applies there); no transparent shim.
+      */
+-    async listen(filter: SubscriptionFilter, options?: RequestOptions): Promise<McpSubscription> {
++    async listen(filter: SubscriptionFilter & Readonly<Record<string, unknown>>, options?: ListenOptions): Promise<McpSubscription> {
+         // Connectivity is checked first so a closed instance rejects with
+         // NotConnected (no setup or ack timer is started); after close(),
+         // `_resetConnectionState` has also cleared the negotiated era, so the
+@@ -2088,6 +2103,7 @@ export class Client extends Protocol<ClientContext> {
+         }
+ 
+         const requestAbort = new AbortController();
++        const streamCloseCancels = this.getProtocolEra() === 'modern' && this.transport.hasPerRequestStream === true;
+         // The listen request's JSON-RPC id (= the spec's subscription id
+         // verbatim). A STRING from a Client-owned counter so it cannot
+         // collide with Protocol's numeric `_requestMessageId` counter — the
+@@ -2104,9 +2120,9 @@ export class Client extends Protocol<ClientContext> {
+         let state: 'opening' | 'open' | 'closed' = 'opening';
+         let ackTimer: ReturnType<typeof setTimeout> | undefined;
+         let onCallerAbort: (() => void) | undefined;
+-        let resolveOpening!: (honored: SubscriptionFilter) => void;
++        let resolveOpening!: (honored: SubscriptionFilter & Readonly<Record<string, unknown>>) => void;
+         let rejectOpening!: (error: Error) => void;
+-        const opening = new Promise<SubscriptionFilter>((resolve, reject) => {
++        const opening = new Promise<SubscriptionFilter & Readonly<Record<string, unknown>>>((resolve, reject) => {
+             resolveOpening = resolve;
+             rejectOpening = reject;
+         });
+@@ -2119,7 +2135,11 @@ export class Client extends Protocol<ClientContext> {
+             resolveClosed = resolve;
+         });
+ 
+-        const settle = (outcome: { ack: SubscriptionFilter } | { cause: 'local' | 'graceful' | 'remote'; error?: Error }): void => {
++        const settle = (
++            outcome:
++                | { ack: SubscriptionFilter & Readonly<Record<string, unknown>> }
++                | { cause: 'local' | 'graceful' | 'remote'; error?: Error }
++        ): void => {
+             if (state === 'closed') return;
+             const wasOpening = state === 'opening';
+             if (ackTimer !== undefined) {
+@@ -2153,19 +2173,15 @@ export class Client extends Protocol<ClientContext> {
+             }
+         };
+ 
+-        // Wire-level teardown for a locally-initiated close (user close, ack
+-        // timeout, caller-signal abort). Transport-agnostic: ALWAYS abort the
+-        // request signal (closes the SSE stream where the transport honors
+-        // `requestSignal` — HTTP does, stdio does not) AND send
+-        // `notifications/cancelled` referencing the listen id (which the
+-        // stdio listen router and any spec-compliant server honor). Sent via
+-        // `notification()` so the modern auto-envelope is attached exactly as
+-        // for every other outbound. Idempotent over HTTP — the cancelled
+-        // notification is a no-op once the stream is gone; correct on every
+-        // other transport. Not called when the server already terminated.
++        // Use the same transport-specific cancellation rule as request():
++        // modern HTTP expects stream-close alone, while stdio has no
++        // per-request stream and needs notifications/cancelled. This cancels
++        // only the listen request, not any task whose events it observes.
+         const wireTeardown = async (): Promise<void> => {
+             requestAbort.abort();
+-            await this.notification({ method: 'notifications/cancelled', params: { requestId: listenId } }).catch(() => {});
++            if (!streamCloseCancels) {
++                await this.notification({ method: 'notifications/cancelled', params: { requestId: listenId } }).catch(() => {});
++            }
+         };
+ 
+         const close = async (): Promise<void> => {
+@@ -2174,10 +2190,34 @@ export class Client extends Protocol<ClientContext> {
+             await wireTeardown();
+         };
+ 
++        const receiverFailed = (error: unknown): void => {
++            void close();
++            // This also runs as a rejection handler. User error-reporting
++            // code must not create an unhandled rejection of its own.
++            try {
++                this.onerror?.(error instanceof Error ? error : new Error(String(error)));
++            } catch {
++                // The receiver's subscription is already closed.
++            }
++        };
++
+         // The per-subscription state is registered BEFORE the request is sent
+         // so a synchronously-delivered ack (an in-process transport) cannot
+         // race the registration.
+-        this._listenState.set(listenId, { settle });
++        this._listenState.set(listenId, {
++            settle,
++            ...(options?.onNotification && {
++                onNotification: (notification: JSONRPCNotification) => {
++                    if (state !== 'open') return;
++                    try {
++                        const received = options.onNotification!(notification);
++                        if (received !== undefined) void Promise.resolve(received).catch(receiverFailed);
++                    } catch (error) {
++                        receiverFailed(error);
++                    }
++                }
++            })
++        });
+ 
+         const ackTimeout = options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC;
+         ackTimer = setTimeout(() => {
+@@ -2361,6 +2401,18 @@ export class Client extends Protocol<ClientContext> {
+             stream.onNotification(raw);
+             return;
+         }
++        // An explicitly addressed data frame is never a global event. Drop
++        // unknown/closed ids without retaining tombstones; a late frame must
++        // not escape into another consumer after local cancellation. Keep
++        // unmatched control notifications observable as before.
++        const listen = typeof streamId === 'string' ? this._listenState.get(streamId) : undefined;
++        if (
++            streamId !== undefined &&
++            listen === undefined &&
++            raw.method !== 'notifications/subscriptions/acknowledged' &&
++            raw.method !== 'notifications/cancelled'
++        )
++            return;
+         // Response-cache invalidation: a `list_changed` notification means the
+         // matching cached list result is stale. Evict (do NOT refetch) before
+         // dispatch so a handler that reaches the cache observes the cleared
+@@ -2403,7 +2455,17 @@ export class Client extends Protocol<ClientContext> {
+                 // vocabulary): a malformed honored filter still settles the
+                 // listen — `{}` means "nothing honored".
+                 const honored = this._wireCodec().validateNotification('notifications/subscriptions/acknowledged', raw);
+-                entry.settle({ ack: honored.ok ? honored.value.params.notifications : {} });
++                // The core codec validates the known fields but strips extension
++                // fields. Preserve the latter as unknown data for the extension
++                // that owns their schema; never revive invalid core fields.
++                entry.settle({
++                    ack: honored.ok
++                        ? {
++                              ...(raw.params?.notifications as Record<string, unknown>),
++                              ...honored.value.params.notifications
++                          }
++                        : {}
++                });
+                 return;
+             }
+         }
+@@ -2420,6 +2482,11 @@ export class Client extends Protocol<ClientContext> {
+                 return;
+             }
+         }
++        const scoped = listen?.onNotification;
++        if (scoped !== undefined) {
++            scoped(raw);
++            return;
++        }
+         super._onnotification(raw, extra);
+     }
+ 
+diff --git a/packages/client/src/index.ts b/packages/client/src/index.ts
+index dc51fa83..750de3ed 100644
+--- a/packages/client/src/index.ts
++++ b/packages/client/src/index.ts
+@@ -67,7 +67,14 @@ export {
+     PrivateKeyJwtProvider,
+     StaticPrivateKeyJwtProvider
+ } from './client/authExtensions';
+-export type { CacheableRequestOptions, CallToolRequestOptions, ClientOptions, ConnectOptions, McpSubscription } from './client/client';
++export type {
++    CacheableRequestOptions,
++    CallToolRequestOptions,
++    ClientOptions,
++    ConnectOptions,
++    ListenOptions,
++    McpSubscription
++} from './client/client';
+ export { Client } from './client/client';
+ export { getSupportedElicitationModes } from './client/client';
+ export type { DiscoverAndRequestJwtAuthGrantOptions, JwtAuthGrantResult, RequestJwtAuthGrantOptions } from './client/crossAppAccess';
+diff --git a/packages/client/test/client/listen.test.ts b/packages/client/test/client/listen.test.ts
+index acc8e33d..0b6a2dd4 100644
+--- a/packages/client/test/client/listen.test.ts
++++ b/packages/client/test/client/listen.test.ts
+@@ -2,11 +2,11 @@
+  * `Client.listen()` — the `subscriptions/listen` driver (protocol revision
+  * 2026-07-28). Covers ack-resolved-promise, change-notification dispatch to
+  * existing setNotificationHandler registrations, the F-12 legacy-era steer,
+- * transport-agnostic close (always sends notifications/cancelled), inbound
++ * transport-specific cancellation, inbound
+  * server-side cancel, and ClientOptions.listChanged auto-open on a modern
+  * connection.
+  */
+-import type { JSONRPCMessage, JSONRPCNotification } from '@modelcontextprotocol/core-internal';
++import type { JSONRPCMessage, JSONRPCNotification, JSONRPCRequest } from '@modelcontextprotocol/core-internal';
+ import {
+     InMemoryTransport,
+     LATEST_PROTOCOL_VERSION,
+@@ -18,6 +18,7 @@ import {
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ 
+ import { Client } from '../../src/client/client';
++import { StreamableHTTPClientTransport } from '../../src/client/streamableHttp';
+ 
+ const MODERN = '2026-07-28';
+ const flush = () => new Promise(r => setTimeout(r, 10));
+@@ -83,6 +84,105 @@ async function scriptedModernNoAck() {
+ }
+ 
+ describe('Client.listen()', () => {
++    it('routes overlapping extension filters to their own receiver, including immediately after ack', async () => {
++        const ids: Array<string | number> = [];
++        const { clientTx, serverTx } = await scriptedModern((id, _filter, send) => {
++            ids.push(id);
++            send({
++                jsonrpc: '2.0',
++                method: 'notifications/tasks',
++                params: {
++                    taskId: 'shared',
++                    status: 'working',
++                    _meta: { [SUBSCRIPTION_ID_META_KEY]: id }
++                }
++            });
++        });
++        const client = new Client({ name: 'c', version: '1' }, { versionNegotiation: { mode: 'auto' } });
++        const global = vi.fn();
++        client.fallbackNotificationHandler = global;
++        await client.connect(clientTx);
++        const a = vi.fn(),
++            b = vi.fn();
++        const first = await client.listen({ taskIds: ['shared'] }, { onNotification: a });
++        const second = await client.listen({ taskIds: ['shared'] }, { onNotification: b });
++        expect(a).toHaveBeenCalledTimes(1);
++        expect(b).toHaveBeenCalledTimes(1);
++        expect(global).not.toHaveBeenCalled();
++        await first.close();
++        for (const id of ids)
++            await serverTx.send({
++                jsonrpc: '2.0',
++                method: 'notifications/tasks',
++                params: {
++                    taskId: 'shared',
++                    status: 'completed',
++                    _meta: { [SUBSCRIPTION_ID_META_KEY]: id }
++                }
++            });
++        expect(a).toHaveBeenCalledTimes(1);
++        expect(b).toHaveBeenCalledTimes(2);
++        expect(global).not.toHaveBeenCalled();
++        await serverTx.send({
++            jsonrpc: '2.0',
++            method: 'notifications/tasks',
++            params: { taskId: 'shared', status: 'working', _meta: { [SUBSCRIPTION_ID_META_KEY]: 'unknown' } }
++        });
++        expect(global).not.toHaveBeenCalled();
++        // Unaddressed legacy notifications still reach their registered handler.
++        await serverTx.send({ jsonrpc: '2.0', method: 'notifications/tasks', params: { taskId: 'legacy' } });
++        expect(global).toHaveBeenCalledOnce();
++        await second.close();
++        await client.close();
++    });
++
++    it.each(['throw', 'reject'] as const)('closes only a scoped receiver that fails by %s', async failure => {
++        const ids: Array<string | number> = [];
++        const { clientTx, serverTx } = await scriptedModern(id => {
++            ids.push(id);
++        });
++        const client = new Client({ name: 'c', version: '1' }, { versionNegotiation: { mode: 'auto' } });
++        const errors = vi.fn();
++        client.onerror = errors;
++        await client.connect(clientTx);
++        const first = await client.listen(
++            { taskIds: ['shared'] },
++            {
++                onNotification: () => {
++                    if (failure === 'reject') return Promise.reject(new Error('receiver failed'));
++                    throw new Error('receiver failed');
++                }
++            }
++        );
++        const other = vi.fn();
++        const second = await client.listen({ taskIds: ['shared'] }, { onNotification: other });
++        for (const id of ids)
++            await serverTx.send({
++                jsonrpc: '2.0',
++                method: 'notifications/tasks',
++                params: {
++                    taskId: 'shared',
++                    status: 'working',
++                    _meta: { [SUBSCRIPTION_ID_META_KEY]: id }
++                }
++            });
++        expect(await first.closed).toBe('local');
++        expect(errors).toHaveBeenCalledOnce();
++        expect(other).toHaveBeenCalledOnce();
++        await second.close();
++        await client.close();
++    });
++
++    it('preserves acknowledged extension fields without claiming their schema', async () => {
++        const { clientTx } = await scriptedModern();
++        const client = new Client({ name: 'c', version: '1' }, { versionNegotiation: { mode: 'auto' } });
++        await client.connect(clientTx);
++        const subscription = await client.listen({ toolsListChanged: true, taskIds: ['native-task'] });
++        expect(subscription.honoredFilter).toEqual({ toolsListChanged: true, taskIds: ['native-task'] });
++        await subscription.close();
++        await client.close();
++    });
++
+     it('throws a typed steer on a legacy-era connection (no wire write)', async () => {
+         const [clientTx, serverTx] = InMemoryTransport.createLinkedPair();
+         const written: JSONRPCMessage[] = [];
+@@ -114,7 +214,9 @@ describe('Client.listen()', () => {
+ 
+     it('resolves on ack with the honored filter; change notifications reach setNotificationHandler', async () => {
+         let send!: (m: JSONRPCMessage) => void;
+-        const { clientTx } = await scriptedModern((_id, _f, s) => {
++        let id!: string | number;
++        const { clientTx } = await scriptedModern((listenId, _f, s) => {
++            id = listenId;
+             send = s;
+         });
+         const client = new Client({ name: 'c', version: '1' }, { versionNegotiation: { mode: 'auto' } });
+@@ -130,7 +232,7 @@ describe('Client.listen()', () => {
+         send({
+             jsonrpc: '2.0',
+             method: 'notifications/tools/list_changed',
+-            params: { _meta: { [SUBSCRIPTION_ID_META_KEY]: 0 } }
++            params: { _meta: { [SUBSCRIPTION_ID_META_KEY]: id } }
+         });
+         await flush();
+         expect(seen).toEqual(['tools']);
+@@ -138,11 +240,10 @@ describe('Client.listen()', () => {
+         await client.close();
+     });
+ 
+-    it('close() sends notifications/cancelled referencing the listen id on any transport', async () => {
++    it('close() sends notifications/cancelled referencing the listen id without a per-request stream', async () => {
+         // Plain InMemoryTransport (neither child-process nor SSE-stream
+         // semantics): close() must NOT depend on transport-kind detection —
+-        // it always sends notifications/cancelled, so a spec-compliant server
+-        // on InMemory / SSE / a custom transport tears the subscription down.
++        // like stdio, it needs notifications/cancelled to close the subscription.
+         const { clientTx, written } = await scriptedModern();
+         const client = new Client({ name: 'c', version: '1' }, { versionNegotiation: { mode: 'auto' } });
+         await client.connect(clientTx);
+@@ -163,6 +264,93 @@ describe('Client.listen()', () => {
+         await client.close();
+     });
+ 
++    it.each(['close', 'abort', 'ack timeout'] as const)(
++        'modern HTTP %s aborts only its listen stream without a cancellation POST',
++        async ending => {
++            const written: JSONRPCRequest[] = [];
++            const streams: Array<{ id: string | number; signal: AbortSignal; controller: ReadableStreamDefaultController<Uint8Array> }> =
++                [];
++            const encoder = new TextEncoder();
++            const frame = (notification: JSONRPCNotification) => encoder.encode(`data: ${JSON.stringify(notification)}\n\n`);
++            const transport = new StreamableHTTPClientTransport(new URL('https://example.com/mcp'), {
++                fetch: async (_url, init) => {
++                    if (init?.method !== 'POST') return new Response(null, { status: 405 });
++                    const request = JSON.parse(init.body as string) as JSONRPCRequest;
++                    written.push(request);
++                    if (request.method === 'server/discover') {
++                        return Response.json({
++                            jsonrpc: '2.0',
++                            id: request.id,
++                            result: {
++                                resultType: 'complete',
++                                supportedVersions: [MODERN],
++                                capabilities: {},
++                                _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'http', version: '1' } }
++                            }
++                        });
++                    }
++                    if (request.method !== 'subscriptions/listen') return new Response(null, { status: 400 });
++                    const signal = init.signal!;
++                    const body = new ReadableStream<Uint8Array>({
++                        start(controller) {
++                            streams.push({ id: request.id, signal, controller });
++                            // Model fetch's response body rejecting when its request is aborted.
++                            signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
++                            if (ending !== 'ack timeout' || streams.length === 1) {
++                                controller.enqueue(
++                                    frame({
++                                        jsonrpc: '2.0',
++                                        method: 'notifications/subscriptions/acknowledged',
++                                        params: {
++                                            notifications: request.params?.notifications,
++                                            _meta: { [SUBSCRIPTION_ID_META_KEY]: request.id }
++                                        }
++                                    })
++                                );
++                            }
++                        }
++                    });
++                    return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
++                }
++            });
++            const client = new Client({ name: 'c', version: '1' }, { versionNegotiation: { mode: { pin: MODERN } } });
++            const errors = vi.fn();
++            client.onerror = errors;
++            await client.connect(transport);
++            try {
++                const received = vi.fn();
++                const sibling = await client.listen({ taskIds: ['shared'] }, { onNotification: received });
++                const caller = new AbortController();
++                const opening = client.listen({ taskIds: ['shared'] }, { signal: caller.signal, timeout: 25 });
++                if (ending === 'ack timeout') {
++                    await expect(opening).rejects.toMatchObject({ code: SdkErrorCode.RequestTimeout });
++                } else {
++                    const subscription = await opening;
++                    if (ending === 'abort') caller.abort();
++                    else await subscription.close();
++                    await expect(subscription.closed).resolves.toBe('local');
++                    await subscription.close();
++                }
++                expect(streams).toHaveLength(2);
++                expect(streams[1]!.signal.aborted).toBe(true);
++                expect(streams[0]!.signal.aborted).toBe(false);
++                streams[0]!.controller.enqueue(
++                    frame({
++                        jsonrpc: '2.0',
++                        method: 'notifications/tasks',
++                        params: { taskId: 'shared', status: 'completed', _meta: { [SUBSCRIPTION_ID_META_KEY]: streams[0]!.id } }
++                    })
++                );
++                await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
++                await sibling.close();
++                expect(written.map(request => request.method)).toEqual(['server/discover', 'subscriptions/listen', 'subscriptions/listen']);
++                expect(errors).not.toHaveBeenCalled();
++            } finally {
++                await client.close();
++            }
++        }
++    );
++
+     it("inbound notifications/cancelled post-ack: closed resolves 'remote'; subscription torn down; handlers stop firing", async () => {
+         let listenId!: number | string;
+         let send!: (m: JSONRPCMessage) => void;
+diff --git a/packages/client/tsdown.config.ts b/packages/client/tsdown.config.ts
+index c8dd21bd..34588b62 100644
+--- a/packages/client/tsdown.config.ts
++++ b/packages/client/tsdown.config.ts
+@@ -15,6 +15,7 @@ export default defineConfig({
+     ],
+     format: ['esm', 'cjs'],
+     fixedExtension: true,
++    hash: false,
+     outDir: 'dist',
+     clean: true,
+     sourcemap: true,
+diff --git a/packages/core/tsdown.config.ts b/packages/core/tsdown.config.ts
+index dbcebdd7..83861266 100644
+--- a/packages/core/tsdown.config.ts
++++ b/packages/core/tsdown.config.ts
+@@ -11,6 +11,9 @@ export default defineConfig({
+     entry: ['src/index.ts', 'src/internal.ts', 'src/ext/skills/index.ts', 'src/ext/events/index.ts'],
+     format: ['esm', 'cjs'],
+     fixedExtension: true,
++    // Package versions identify this complete graph. Stable names also let
++    // declaration normalization avoid retaining pre-normalization hashes.
++    hash: false,
+     outDir: 'dist',
+     clean: true,
+     sourcemap: true,
+diff --git a/packages/server/src/index.ts b/packages/server/src/index.ts
+index cfc87a27..092c4e7c 100644
+--- a/packages/server/src/index.ts
++++ b/packages/server/src/index.ts
+@@ -67,7 +67,15 @@ export { createRequestStateCodec } from './server/requestStateCodec';
+ export type { ServerOptions } from './server/server';
+ export { Server } from './server/server';
+ // subscriptions/listen change-event sourcing seam (protocol revision 2026-07-28).
+-export type { ServerEvent, ServerEventBus, ServerNotifier } from './server/serverEventBus';
++export type {
++    ExtensionServerEvent,
++    ListenExtension,
++    ListenExtensionContext,
++    OpenedListenExtension,
++    ServerEvent,
++    ServerEventBus,
++    ServerNotifier
++} from './server/serverEventBus';
+ export { InMemoryServerEventBus } from './server/serverEventBus';
+ // StdioServerTransport and the serveStdio entry are exported from the './stdio' subpath — server stdio
+ // has only type-level Node imports (erased at compile time), but matching the client's `./stdio` subpath
+diff --git a/packages/server/src/server/createMcpHandler.ts b/packages/server/src/server/createMcpHandler.ts
+index 901b5d70..24d76367 100644
+--- a/packages/server/src/server/createMcpHandler.ts
++++ b/packages/server/src/server/createMcpHandler.ts
+@@ -71,7 +71,7 @@ import { DEFAULT_MAX_REQUEST_BODY_SIZE, readRequestBody, requestBodyTooLargeMess
+ import { createScopeChallengeResponse, findScopeChallenge, scopeChallengeResourceMetadataUrl } from './scopeChallenge';
+ import type { Server } from './server';
+ import { installModernOnlyHandlers, seedClientIdentityFromEnvelope, serverIdentityOf } from './server';
+-import type { ServerEventBus, ServerNotifier } from './serverEventBus';
++import type { ListenExtension, ServerEventBus, ServerNotifier } from './serverEventBus';
+ import { createServerNotifier, InMemoryServerEventBus } from './serverEventBus';
+ import { DEFAULT_SSE_KEEP_ALIVE_MS } from './sseKeepAlive';
+ import { WebStandardStreamableHTTPServerTransport } from './streamableHttp';
+@@ -205,6 +205,13 @@ export interface CreateMcpHandlerOptions {
+      * @default 1024
+      */
+     maxSubscriptions?: number;
++    /**
++     * Extensions that honor their own fields of the `subscriptions/listen`
++     * filter (for example the Tasks extension's `taskIds`) and deliver their
++     * own notifications, published with `notify.extension(method, params)` or
++     * `bus.publish({ kind: 'extension', ... })`. See {@linkcode ListenExtension}.
++     */
++    listenExtensions?: readonly ListenExtension[];
+     /**
+      * SSE comment-frame keepalive interval for every SSE stream this handler
+      * serves, except the Events extension's `events/stream` streams, whose
+@@ -722,6 +729,7 @@ export function createMcpHandler(factory: McpServerFactory, options: CreateMcpHa
+         bus,
+         maxSubscriptions: options.maxSubscriptions ?? DEFAULT_MAX_SUBSCRIPTIONS,
+         keepAliveMs: options.keepAliveMs ?? DEFAULT_SSE_KEEP_ALIVE_MS,
++        ...(options.listenExtensions !== undefined && { extensions: options.listenExtensions }),
+         onerror: reportError
+     });
+     if (responseMode === 'json') {
+@@ -823,7 +831,10 @@ export function createMcpHandler(factory: McpServerFactory, options: CreateMcpHa
+             const capabilities = server.getCapabilities();
+             const serverInfo = serverIdentityOf(server);
+             void product.close().catch(reportError);
+-            return listenRouter.serve(route.message, request.signal, capabilities, serverInfo);
++            return listenRouter.serve(route.message, request.signal, capabilities, serverInfo, {
++                requestInfo: request,
++                ...(authInfo !== undefined && { authInfo })
++            });
+         }
+ 
+         // SEP-2243 `Mcp-Param-*` server-side validation (pre-dispatch ladder
+diff --git a/packages/server/src/server/listenExtensionSession.ts b/packages/server/src/server/listenExtensionSession.ts
+new file mode 100644
+index 00000000..3788ea5d
+--- /dev/null
++++ b/packages/server/src/server/listenExtensionSession.ts
+@@ -0,0 +1,149 @@
++import type { AuthInfo, JSONRPCRequest, ServerCapabilities, SubscriptionFilter } from '@modelcontextprotocol/core-internal';
++
++import type { ExtensionServerEvent, HonoredListen, ListenExtension, OpenedListenExtension } from './serverEventBus';
++import { honorListen } from './serverEventBus';
++
++const MAX_PENDING_EVENTS = 128;
++const MAX_PENDING_BYTES = 1024 * 1024;
++const encoder = new TextEncoder();
++
++/** One setup/teardown lifetime attached to the entry's existing subscription. */
++export function createListenExtensionSession(options: {
++    message: JSONRPCRequest;
++    filter: SubscriptionFilter;
++    requested: Readonly<Record<string, unknown>>;
++    capabilities: ServerCapabilities;
++    extensions: readonly ListenExtension[];
++    requestInfo?: Request;
++    authInfo?: AuthInfo;
++    onEvent: (event: ExtensionServerEvent) => void;
++    onFailure: () => void;
++    onFinish: () => void;
++    onerror?: (error: Error) => void;
++}) {
++    const lifetime = new AbortController();
++    let active = false;
++    let finishing = false;
++    let pendingBytes = 0;
++    let pending: Array<{ extension: ListenExtension; event: ExtensionServerEvent }> = [];
++    let honored: HonoredListen | undefined;
++    const opened: OpenedListenExtension[] = [];
++    const acceptedFilters = new Map<ListenExtension, Readonly<Record<string, unknown>> | undefined>();
++    let rejectClosed!: (reason: Error) => void;
++    const closed = new Promise<never>((_, reject) => {
++        rejectClosed = reject;
++    });
++    const report = (error: unknown) => {
++        try {
++            options.onerror?.(error instanceof Error ? error : new Error(String(error)));
++        } catch {
++            /* Reporting must not interrupt subscription cleanup. */
++        }
++    };
++    const dispose = (resource: OpenedListenExtension) => {
++        try {
++            void Promise.resolve(resource.dispose?.()).catch(report);
++        } catch (error) {
++            report(error);
++        }
++    };
++    const close = () => {
++        if (lifetime.signal.aborted) return;
++        lifetime.abort();
++        pending = [];
++        pendingBytes = 0;
++        for (const resource of opened.splice(0)) dispose(resource);
++        rejectClosed(new Error('Subscription closed during setup'));
++    };
++    const fail = (error: unknown) => {
++        report(error);
++        close();
++        options.onFailure();
++    };
++    const deliver = (extension: ListenExtension, event: ExtensionServerEvent) => {
++        if (lifetime.signal.aborted || !extension.methods.includes(event.method)) return;
++        const accepted = honored?.extensions.find(entry => entry.extension === extension);
++        if (accepted === undefined) return;
++        try {
++            if (extension.accepts(accepted.honored, event)) options.onEvent(event);
++        } catch (error) {
++            fail(error);
++        }
++    };
++    const publish = (extension: ListenExtension, event: ExtensionServerEvent) => {
++        if (lifetime.signal.aborted || finishing || !extension.methods.includes(event.method)) return;
++        if (active) {
++            deliver(extension, event);
++            return;
++        }
++        try {
++            const serialized = JSON.stringify(event);
++            const bytes = encoder.encode(serialized).byteLength;
++            if (pending.length >= MAX_PENDING_EVENTS || pendingBytes + bytes > MAX_PENDING_BYTES) {
++                fail(new Error('Subscription setup notification buffer exceeded'));
++                return;
++            }
++            pending.push({ extension, event: JSON.parse(serialized) as ExtensionServerEvent });
++            pendingBytes += bytes;
++        } catch (error) {
++            fail(error);
++        }
++    };
++    const setup = Promise.all(
++        options.extensions.map(async extension => {
++            if (extension.open === undefined) return;
++            const resource = await extension.open(options.requested, options.capabilities, {
++                request: options.message,
++                ...(options.requestInfo !== undefined && { requestInfo: options.requestInfo }),
++                ...(options.authInfo !== undefined && { authInfo: options.authInfo }),
++                signal: lifetime.signal,
++                close: () => {
++                    if (lifetime.signal.aborted) return;
++                    close();
++                    options.onFailure();
++                },
++                finish: () => {
++                    if (lifetime.signal.aborted || finishing) return;
++                    finishing = true;
++                    if (active) options.onFinish();
++                },
++                publish: event => publish(extension, event)
++            });
++            if (resource !== undefined) {
++                if (lifetime.signal.aborted) dispose(resource);
++                else opened.push(resource);
++            }
++            // Retain the original extension, including its prototype and method
++            // receiver. A copied instance can lose open() and become broadcast.
++            acceptedFilters.set(extension, resource?.notifications);
++        })
++    ).then(() => {
++        if (lifetime.signal.aborted) throw new Error('Subscription closed during setup');
++        honored = honorListen(
++            options.filter,
++            options.requested,
++            options.capabilities,
++            options.extensions,
++            options.onerror,
++            acceptedFilters
++        );
++        return honored;
++    });
++    const ready = Promise.race([setup, closed]).catch(error => {
++        close();
++        throw error;
++    });
++    return {
++        ready,
++        close,
++        activate() {
++            if (active || lifetime.signal.aborted || honored === undefined) return;
++            active = true;
++            const queued = pending;
++            pending = [];
++            pendingBytes = 0;
++            for (const { extension, event } of queued) deliver(extension, event);
++            if (finishing && !lifetime.signal.aborted) options.onFinish();
++        }
++    };
++}
+diff --git a/packages/server/src/server/listenRouter.ts b/packages/server/src/server/listenRouter.ts
+index e58807d5..9e5028f3 100644
+--- a/packages/server/src/server/listenRouter.ts
++++ b/packages/server/src/server/listenRouter.ts
+@@ -24,20 +24,36 @@
+  *   disconnect.
+  */
+ import type {
++    AuthInfo,
+     Implementation,
+     JSONRPCRequest,
+     RequestId,
+     ServerCapabilities,
+     SubscriptionFilter
+ } from '@modelcontextprotocol/core-internal';
+-import { codecForVersion, MODERN_WIRE_REVISION, SERVER_INFO_META_KEY, SUBSCRIPTION_ID_META_KEY } from '@modelcontextprotocol/core-internal';
++import {
++    codecForVersion,
++    MODERN_WIRE_REVISION,
++    ProtocolError,
++    SERVER_INFO_META_KEY,
++    SUBSCRIPTION_ID_META_KEY
++} from '@modelcontextprotocol/core-internal';
+ 
+-import type { ServerEventBus } from './serverEventBus';
+-import { honoredSubset, listenFilterAccepts, serverEventToNotification } from './serverEventBus';
++import { createListenExtensionSession } from './listenExtensionSession';
++import type { HonoredListen, ListenExtension, ServerEvent, ServerEventBus } from './serverEventBus';
++import {
++    assertListenExtensions,
++    CORE_CHANGE_NOTIFICATION_METHODS,
++    honoredListenAccepts,
++    honorListen,
++    serverEventToNotification,
++    validateListenExtensions
++} from './serverEventBus';
+ import { armSseKeepAlive, DEFAULT_SSE_KEEP_ALIVE_MS } from './sseKeepAlive';
+ 
+ /** Default capacity guard: refuse a new subscription when this many are already open. */
+ export const DEFAULT_MAX_SUBSCRIPTIONS = 1024;
++const MAX_LISTEN_OUTPUT_BYTES = 1024 * 1024;
+ 
+ /** Options for {@linkcode createListenRouter}. */
+ export interface ListenRouterOptions {
+@@ -47,6 +63,8 @@ export interface ListenRouterOptions {
+     maxSubscriptions?: number;
+     /** SSE comment-frame keepalive interval; `0` disables keepalive (default 15000). */
+     keepAliveMs?: number;
++    /** Extensions that honor their own filter fields and deliver their own notifications (see {@linkcode ListenExtension}). */
++    extensions?: readonly ListenExtension[];
+     /** Out-of-band error reporting (never alters the response). */
+     onerror?: (error: Error) => void;
+ }
+@@ -60,8 +78,23 @@ export interface NotificationBody {
+     params: { _meta?: Record<string, unknown>; [key: string]: unknown };
+ }
+ 
+-function jsonRpcError(id: RequestId | null, code: number, message: string): Response {
+-    return Response.json({ jsonrpc: '2.0', error: { code, message }, id }, { status: 200 });
++function jsonRpcError(id: RequestId | null, code: number, message: string, data?: unknown): Response {
++    return Response.json({ jsonrpc: '2.0', error: { code, message, ...(data !== undefined && { data }) }, id }, { status: 200 });
++}
++
++function setupError(error: unknown, onerror?: (error: Error) => void) {
++    try {
++        onerror?.(error instanceof Error ? error : new Error(String(error)));
++    } catch {
++        /* Reporting cannot replace the protocol result or skip teardown. */
++    }
++    return error instanceof ProtocolError && Number.isSafeInteger(error.code)
++        ? {
++              code: codecForVersion(MODERN_WIRE_REVISION).encodeErrorCode(error.code),
++              message: error.message,
++              ...(error.data !== undefined && { data: error.data })
++          }
++        : { code: -32_603, message: 'Subscription setup failed' };
+ }
+ 
+ /** Stamp the subscription id onto a notification's `_meta`. Non-mutating. */
+@@ -91,6 +124,47 @@ export function parseListenFilter(message: JSONRPCRequest): SubscriptionFilter |
+     return outcome.ok ? outcome.value.params?.notifications : undefined;
+ }
+ 
++/**
++ * The raw `params.notifications` object of a listen request, unknown fields
++ * included. The wire schema strips fields outside the core filter; this is
++ * what {@linkcode ListenExtension} hooks read their own fields from.
++ */
++function rawListenFilter(message: JSONRPCRequest): Record<string, unknown> {
++    const notifications: unknown = (message.params as { notifications?: unknown } | undefined)?.notifications;
++    return typeof notifications === 'object' && notifications !== null && !Array.isArray(notifications)
++        ? (notifications as Record<string, unknown>)
++        : {};
++}
++
++const INVALID_FILTER_MESSAGE = "Invalid params: 'notifications' is required and must be a valid SubscriptionFilter";
++
++/**
++ * Parse, validate and honor a listen request's filter, shared by the HTTP and
++ * stdio routers so both entries apply the same rules. Returns the honored
++ * listen, or the `-32602` message to answer with.
++ */
++function honorListenRequest(
++    message: JSONRPCRequest,
++    capabilities: ServerCapabilities,
++    extensions: readonly ListenExtension[],
++    onerror: ((error: Error) => void) | undefined
++): HonoredListen | { invalid: string } {
++    const filter = parseListenFilter(message);
++    if (filter === undefined) return { invalid: INVALID_FILTER_MESSAGE };
++    if (extensions.length === 0) return honorListen(filter, {}, capabilities, extensions, onerror);
++    const requested = rawListenFilter(message);
++    const invalid = validateListenExtensions(requested, extensions, onerror);
++    if (invalid !== undefined) return { invalid: `Invalid params: ${invalid}` };
++    // Async setup produces the authoritative extension filter once it settles.
++    return honorListen(
++        filter,
++        requested,
++        capabilities,
++        extensions.some(extension => extension.open !== undefined) ? [] : extensions,
++        onerror
++    );
++}
++
+ /**
+  * The HTTP listen router: holds the set of open subscriptions and serves
+  * each listen request as an SSE response.
+@@ -108,7 +182,13 @@ export interface ListenRouter {
+      * graceful-close result's `_meta` (the spec's `SubscriptionsListenResultMetaObject`
+      * extends `ResultMetaObject`, so the serverInfo SHOULD applies there too).
+      */
+-    serve(message: JSONRPCRequest, signal: AbortSignal | undefined, capabilities: ServerCapabilities, serverInfo: Implementation): Response;
++    serve(
++        message: JSONRPCRequest,
++        signal: AbortSignal | undefined,
++        capabilities: ServerCapabilities,
++        serverInfo: Implementation,
++        context?: { requestInfo?: Request; authInfo?: AuthInfo }
++    ): Promise<Response>;
+     /**
+      * Gracefully close every open subscription stream: emits the empty
+      * `subscriptions/listen` JSON-RPC result (the spec's graceful-close
+@@ -121,27 +201,30 @@ export interface ListenRouter {
+ 
+ export function createListenRouter(options: ListenRouterOptions): ListenRouter {
+     const { bus, onerror } = options;
++    const extensions = options.extensions ?? [];
++    assertListenExtensions(extensions);
+     const maxSubscriptions = options.maxSubscriptions ?? DEFAULT_MAX_SUBSCRIPTIONS;
+     const keepAliveMs = options.keepAliveMs ?? DEFAULT_SSE_KEEP_ALIVE_MS;
+ 
+     const open = new Set<(graceful: boolean) => void>();
+ 
+-    function serve(
++    async function serve(
+         message: JSONRPCRequest,
+         signal: AbortSignal | undefined,
+         capabilities: ServerCapabilities,
+-        serverInfo: Implementation
+-    ): Response {
++        serverInfo: Implementation,
++        context: { requestInfo?: Request; authInfo?: AuthInfo } = {}
++    ): Promise<Response> {
+         // Capacity guard, pre-ack: in-band -32603 on HTTP 200.
+         if (open.size >= maxSubscriptions) {
+             onerror?.(new Error(`subscriptions/listen refused: subscription limit reached (${maxSubscriptions})`));
+             return jsonRpcError(message.id, -32_603, 'Subscription limit reached');
+         }
+-        const filter = parseListenFilter(message);
+-        if (filter === undefined) {
+-            return jsonRpcError(message.id, -32_602, "Invalid params: 'notifications' is required and must be a valid SubscriptionFilter");
++        const initial = honorListenRequest(message, capabilities, extensions, onerror);
++        if ('invalid' in initial) {
++            return jsonRpcError(message.id, -32_602, initial.invalid);
+         }
+-        const honored = honoredSubset(filter, capabilities);
++        let honored = initial;
+         // The spec carries the listen request's JSON-RPC id verbatim as the
+         // subscription id; demux is per-connection (each HTTP listen has its
+         // own SSE stream) so client-chosen ids cannot route across requests.
+@@ -153,11 +236,23 @@ export function createListenRouter(options: ListenRouterOptions): ListenRouter {
+         let unsubscribe: (() => void) | undefined;
+         let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
+         let abortCleanup: (() => void) | undefined;
++        let session: ReturnType<typeof createListenExtensionSession> | undefined;
+ 
+         const writeFrame = (frame: string) => {
+             if (closed) return;
+             try {
+-                controller.enqueue(encoder.encode(frame));
++                const bytes = encoder.encode(frame);
++                const backlog = -(controller.desiredSize ?? 0);
++                if (backlog + bytes.byteLength > MAX_LISTEN_OUTPUT_BYTES) {
++                    // Erroring the native stream discards its retained queue.
++                    // The client observes a disconnect and can recover state.
++                    const error = new Error('Subscription output buffer exceeded');
++                    controller.error(error);
++                    teardown(false);
++                    onerror?.(error);
++                    return;
++                }
++                controller.enqueue(bytes);
+             } catch (error) {
+                 onerror?.(error instanceof Error ? error : new Error(String(error)));
+             }
+@@ -168,7 +263,7 @@ export function createListenRouter(options: ListenRouterOptions): ListenRouter {
+ 
+         const teardown = (graceful: boolean) => {
+             if (closed) return;
+-            if (graceful) {
++            if (graceful && controller !== undefined) {
+                 // Server-side graceful close: emit the empty
+                 // `subscriptions/listen` JSON-RPC result before closing the
+                 // stream so the client distinguishes graceful end from a
+@@ -185,7 +280,9 @@ export function createListenRouter(options: ListenRouterOptions): ListenRouter {
+                     })}\n\n`
+                 );
+             }
++            if (closed) return;
+             closed = true;
++            session?.close();
+             try {
+                 unsubscribe?.();
+             } catch (error) {
+@@ -195,59 +292,91 @@ export function createListenRouter(options: ListenRouterOptions): ListenRouter {
+             abortCleanup?.();
+             open.delete(teardown);
+             try {
+-                controller.close();
++                controller?.close();
+             } catch {
+                 // Already closed/cancelled by the consumer.
+             }
+         };
+ 
+-        const readable = new ReadableStream<Uint8Array>({
+-            start(streamController) {
+-                controller = streamController;
+-
+-                // Ack-first MUST: the acknowledged notification is the first
+-                // frame on the stream, stamped with the subscription id.
+-                const ack = stampSubscriptionId(
+-                    { method: 'notifications/subscriptions/acknowledged', params: { notifications: honored } },
+-                    subscriptionId
+-                );
+-                writeNotification(ack.method, ack.params);
+-
+-                // Nothing honored means nothing can ever be delivered: complete the subscription instead of holding the stream.
+-                if (Object.keys(honored).length === 0) {
+-                    teardown(true);
+-                    return;
+-                }
+-
+-                // Only after the ack frame is enqueued does delivery activate.
+-                unsubscribe = bus.subscribe(event => {
+-                    if (closed || !listenFilterAccepts(honored, event)) return;
++        // Reserve the same subscription slot during asynchronous authorization.
++        // A pending setup has the same cancellation and server-close lifetime.
++        open.add(teardown);
++        if (signal !== undefined) {
++            const onAbort = () => teardown(false);
++            signal.addEventListener('abort', onAbort, { once: true });
++            abortCleanup = () => signal.removeEventListener('abort', onAbort);
++            if (signal.aborted) teardown(false);
++        }
++        if (closed) return jsonRpcError(message.id, -32_603, 'Subscription closed');
++        if (extensions.some(extension => extension.open !== undefined)) {
++            session = createListenExtensionSession({
++                message,
++                filter: parseListenFilter(message)!,
++                requested: rawListenFilter(message),
++                capabilities,
++                extensions,
++                ...context,
++                onerror,
++                onEvent: event => {
+                     const note = stampSubscriptionId(serverEventToNotification(event), subscriptionId);
+                     writeNotification(note.method, note.params);
+-                });
+-
+-                keepAliveTimer = armSseKeepAlive(keepAliveMs, () => writeFrame(': keepalive\n\n'));
+-
+-                open.add(teardown);
+-            },
+-            cancel() {
+-                // The client closed the SSE stream — the spec's HTTP cancel
+-                // signal. Not a server-side graceful close, so no listen
+-                // result is written (and the consumer is gone anyway).
++                },
++                onFailure: () => teardown(false),
++                onFinish: () => teardown(true)
++            });
++            try {
++                honored = await session.ready;
++            } catch (error) {
++                const response = setupError(error, onerror);
+                 teardown(false);
++                return jsonRpcError(message.id, response.code, response.message, response.data);
+             }
+-        });
+-
+-        if (signal !== undefined) {
+-            if (signal.aborted) {
+-                teardown(false);
+-            } else {
+-                const onAbort = () => teardown(false);
+-                signal.addEventListener('abort', onAbort, { once: true });
+-                abortCleanup = () => signal.removeEventListener('abort', onAbort);
++            if (closed) {
++                session.close();
++                return jsonRpcError(message.id, -32_603, 'Subscription closed');
+             }
+         }
+ 
++        const readable = new ReadableStream<Uint8Array>(
++            {
++                start(streamController) {
++                    controller = streamController;
++
++                    // Ack-first MUST: the acknowledged notification is the first
++                    // frame on the stream, stamped with the subscription id.
++                    const ack = stampSubscriptionId(
++                        { method: 'notifications/subscriptions/acknowledged', params: { notifications: honored.ack } },
++                        subscriptionId
++                    );
++                    writeNotification(ack.method, ack.params);
++                    session?.activate();
++                    if (closed) return;
++
++                    // Nothing honored means nothing can ever be delivered: complete the subscription instead of holding the stream.
++                    if (Object.keys(honored.ack).length === 0) {
++                        teardown(true);
++                        return;
++                    }
++
++                    // Only after the ack frame is enqueued does delivery activate.
++                    unsubscribe = bus.subscribe(event => {
++                        if (closed || !honoredListenAccepts(honored, event, onerror)) return;
++                        const note = stampSubscriptionId(serverEventToNotification(event), subscriptionId);
++                        writeNotification(note.method, note.params);
++                    });
++
++                    keepAliveTimer = armSseKeepAlive(keepAliveMs, () => writeFrame(': keepalive\n\n'));
++                },
++                cancel() {
++                    // The client closed the SSE stream — the spec's HTTP cancel
++                    // signal. Not a server-side graceful close, so no listen
++                    // result is written (and the consumer is gone anyway).
++                    teardown(false);
++                }
++            },
++            new ByteLengthQueuingStrategy({ highWaterMark: 0 })
++        );
++
+         return new Response(readable, {
+             status: 200,
+             headers: {
+@@ -284,13 +413,6 @@ export interface ListenCloseFrame {
+     };
+ }
+ 
+-const CHANGE_NOTIFICATION_METHODS: ReadonlySet<string> = new Set([
+-    'notifications/tools/list_changed',
+-    'notifications/prompts/list_changed',
+-    'notifications/resources/list_changed',
+-    'notifications/resources/updated'
+-]);
+-
+ /**
+  * Per-connection listen state for the stdio entry. One instance is held by
+  * `serveStdio` for the connection lifetime; it routes inbound
+@@ -301,7 +423,16 @@ const CHANGE_NOTIFICATION_METHODS: ReadonlySet<string> = new Set([
+  */
+ export class StdioListenRouter {
+     /** Active subscriptions, keyed by the listen request's JSON-RPC id verbatim. */
+-    private readonly _subs = new Map<RequestId, SubscriptionFilter>();
++    private readonly _subs = new Map<
++        RequestId,
++        {
++            honored: HonoredListen;
++            active: boolean;
++            session?: ReturnType<typeof createListenExtensionSession>;
++        }
++    >();
++    /** Notification methods some extension delivers through listen subscriptions. */
++    private readonly _extensionMethods: ReadonlySet<string>;
+     /**
+      * The serving instance's declared capabilities. Filled in by the entry
+      * once the modern instance is constructed (the router is created before
+@@ -319,10 +450,14 @@ export class StdioListenRouter {
+     constructor(
+         private readonly _maxSubscriptions: number = DEFAULT_MAX_SUBSCRIPTIONS,
+         serverCapabilities?: ServerCapabilities,
+-        serverInfo?: Implementation
++        serverInfo?: Implementation,
++        private readonly _extensions: readonly ListenExtension[] = [],
++        private readonly _onerror?: (error: Error) => void
+     ) {
+         this._serverCapabilities = serverCapabilities;
+         this._serverInfo = serverInfo;
++        assertListenExtensions(_extensions);
++        this._extensionMethods = new Set(_extensions.flatMap(extension => extension.methods));
+     }
+ 
+     /**
+@@ -341,6 +476,12 @@ export class StdioListenRouter {
+         return this._subs.has(id);
+     }
+ 
++    /** Capture this record, so queued output cannot outlive cancellation or ID reuse. */
++    current(id: RequestId): () => boolean {
++        const record = this._subs.get(id);
++        return () => record !== undefined && this._subs.get(id) === record;
++    }
++
+     /**
+      * Serve one inbound `subscriptions/listen` request: registers the
+      * subscription and returns the stamped acknowledged notification (or, on
+@@ -358,20 +499,91 @@ export class StdioListenRouter {
+                 'StdioListenRouter.serve() called before setServerCapabilities(); refusing to honor a filter without capabilities'
+             );
+         }
+-        if (this._subs.size >= this._maxSubscriptions) {
++        if (this._subs.size >= this._maxSubscriptions || this._subs.has(message.id)) {
+             return { jsonrpc: '2.0', id: message.id, error: { code: -32_603, message: 'Subscription limit reached' } };
+         }
+-        const filter = parseListenFilter(message);
+-        if (filter === undefined) {
+-            return {
+-                jsonrpc: '2.0',
+-                id: message.id,
+-                error: { code: -32_602, message: "Invalid params: 'notifications' is required and must be a valid SubscriptionFilter" }
+-            };
++        const honored = honorListenRequest(message, this._serverCapabilities, this._extensions, this._onerror);
++        if ('invalid' in honored) {
++            return { jsonrpc: '2.0', id: message.id, error: { code: -32_602, message: honored.invalid } };
++        }
++        this._subs.set(message.id, { honored, active: true });
++        return stampSubscriptionId(
++            { method: 'notifications/subscriptions/acknowledged', params: { notifications: honored.ack } },
++            message.id
++        );
++    }
++
++    /** Request-scoped setup; the entry activates it after writing the ack. */
++    async serveAsync(
++        message: JSONRPCRequest,
++        send: (body: NotificationBody | ListenCloseFrame, current?: () => boolean) => void | Promise<void>
++    ) {
++        if (!this._extensions.some(extension => extension.open !== undefined)) return this.serve(message);
++        if (this._serverCapabilities === undefined) throw new Error('Listen capabilities are unavailable');
++        if (this._subs.size >= this._maxSubscriptions || this._subs.has(message.id)) {
++            return { jsonrpc: '2.0' as const, id: message.id, error: { code: -32_603, message: 'Subscription limit reached' } };
++        }
++        const initial = honorListenRequest(message, this._serverCapabilities, this._extensions, this._onerror);
++        if ('invalid' in initial) {
++            return { jsonrpc: '2.0' as const, id: message.id, error: { code: -32_602, message: initial.invalid } };
+         }
+-        const honored = honoredSubset(filter, this._serverCapabilities);
+-        this._subs.set(message.id, honored);
+-        return stampSubscriptionId({ method: 'notifications/subscriptions/acknowledged', params: { notifications: honored } }, message.id);
++        const record: { honored: HonoredListen; active: boolean; session?: ReturnType<typeof createListenExtensionSession> } = {
++            honored: { ack: {}, core: {}, extensions: [] },
++            active: false
++        };
++        this._subs.set(message.id, record);
++        record.session = createListenExtensionSession({
++            message,
++            filter: parseListenFilter(message)!,
++            requested: rawListenFilter(message),
++            capabilities: this._serverCapabilities,
++            extensions: this._extensions,
++            onerror: this._onerror,
++            onEvent: event => {
++                if (record.active) void send(stampSubscriptionId(serverEventToNotification(event), message.id), this.current(message.id));
++            },
++            onFailure: () => {
++                if (record.active) void send(this._closeFrame(message.id));
++                this.cancel(message.id);
++            },
++            onFinish: () => {
++                if (!record.active || this._subs.get(message.id) !== record) return;
++                record.active = false;
++                // Keep this existing record through the ordered write queue.
++                // Explicit cancellation still invalidates all queued guards.
++                const current = this.current(message.id);
++                const settled = () => {
++                    if (current()) this.cancel(message.id);
++                };
++                try {
++                    void Promise.resolve(send(this._closeFrame(message.id), current)).then(settled, error => {
++                        settled();
++                        setupError(error, this._onerror);
++                    });
++                } catch (error) {
++                    settled();
++                    setupError(error, this._onerror);
++                }
++            }
++        });
++        try {
++            record.honored = await record.session.ready;
++        } catch (error) {
++            const response = setupError(error, this._onerror);
++            if (this._subs.get(message.id) === record) this.cancel(message.id);
++            return { jsonrpc: '2.0' as const, id: message.id, error: response };
++        }
++        return stampSubscriptionId(
++            { method: 'notifications/subscriptions/acknowledged', params: { notifications: record.honored.ack } },
++            message.id
++        );
++    }
++
++    acknowledged(id: RequestId): void {
++        const record = this._subs.get(id);
++        if (record === undefined) return;
++        record.active = true;
++        record.session?.activate();
+     }
+ 
+     /**
+@@ -380,28 +592,37 @@ export class StdioListenRouter {
+      * is delivered for that subscription id (the post-cancel hardening).
+      */
+     cancel(id: RequestId): boolean {
+-        return this._subs.delete(id);
++        const record = this._subs.get(id);
++        if (record === undefined) return false;
++        this._subs.delete(id);
++        record.session?.close();
++        return true;
+     }
+ 
+     /**
+      * Route an outbound notification through the active subscriptions.
+      *
+-     * - For a subscription-gated change notification, returns one stamped copy
++     * - For a subscription-gated change notification, or a notification whose
++     *   method a {@linkcode ListenExtension} declares, returns one stamped copy
+      *   per subscription that opted in to it (an empty array means it is
+      *   dropped — the modern era never delivers an un-requested change type).
+      * - For any other outbound message, returns `'passthrough'` (the entry
+      *   forwards it as-is).
+      */
+     routeOutbound(message: { method: string; params?: { [key: string]: unknown } }): NotificationBody[] | 'passthrough' {
+-        if (!CHANGE_NOTIFICATION_METHODS.has(message.method)) {
++        let event: ServerEvent;
++        if (CORE_CHANGE_NOTIFICATION_METHODS.has(message.method)) {
++            const uriParam: unknown = message.params?.['uri'];
++            const uri = typeof uriParam === 'string' ? uriParam : undefined;
++            event = notificationToServerEvent(message.method, uri);
++        } else if (this._extensionMethods.has(message.method)) {
++            event = { kind: 'extension', method: message.method, ...(message.params !== undefined && { params: message.params }) };
++        } else {
+             return 'passthrough';
+         }
+-        const uriParam: unknown = message.params?.['uri'];
+-        const uri = typeof uriParam === 'string' ? uriParam : undefined;
+-        const event = notificationToServerEvent(message.method, uri);
+         const out: NotificationBody[] = [];
+-        for (const [subscriptionId, filter] of this._subs) {
+-            if (listenFilterAccepts(filter, event)) {
++        for (const [subscriptionId, record] of this._subs) {
++            if (record.active && honoredListenAccepts(record.honored, event, this._onerror)) {
+                 out.push(stampSubscriptionId({ method: message.method, params: message.params ?? {} }, subscriptionId));
+             }
+         }
+@@ -417,25 +638,29 @@ export class StdioListenRouter {
+      */
+     teardownAll(): ListenCloseFrame[] {
+         const out: ListenCloseFrame[] = [];
+-        for (const id of this._subs.keys()) {
+-            out.push({
+-                jsonrpc: '2.0',
+-                id,
+-                result: {
+-                    resultType: 'complete',
+-                    _meta: {
+-                        [SUBSCRIPTION_ID_META_KEY]: id,
+-                        ...(this._serverInfo !== undefined && { [SERVER_INFO_META_KEY]: this._serverInfo })
+-                    }
+-                }
+-            });
++        for (const [id, record] of this._subs) {
++            if (record.active) out.push(this._closeFrame(id));
++            this.cancel(id);
+         }
+-        this._subs.clear();
+         return out;
+     }
++
++    private _closeFrame(id: RequestId): ListenCloseFrame {
++        return {
++            jsonrpc: '2.0',
++            id,
++            result: {
++                resultType: 'complete',
++                _meta: {
++                    [SUBSCRIPTION_ID_META_KEY]: id,
++                    ...(this._serverInfo !== undefined && { [SERVER_INFO_META_KEY]: this._serverInfo })
++                }
++            }
++        };
++    }
+ }
+ 
+-function notificationToServerEvent(method: string, uri: string | undefined): import('./serverEventBus').ServerEvent {
++function notificationToServerEvent(method: string, uri: string | undefined): ServerEvent {
+     switch (method) {
+         case 'notifications/tools/list_changed': {
+             return { kind: 'tools_list_changed' };
+diff --git a/packages/server/src/server/listenWriter.ts b/packages/server/src/server/listenWriter.ts
+new file mode 100644
+index 00000000..b63d8fb5
+--- /dev/null
++++ b/packages/server/src/server/listenWriter.ts
+@@ -0,0 +1,65 @@
++import type { JSONRPCMessage } from '@modelcontextprotocol/core-internal';
++
++const MAX_MESSAGES = 128;
++const MAX_BYTES = 1024 * 1024;
++
++/** Bounded listen egress on a shared stdio wire, with exactly one send in flight. */
++export function createListenWriter(send: (message: JSONRPCMessage) => Promise<void>, onFailure: (error: Error) => void) {
++    type Entry = { serialized: string; bytes: number; isCurrent?: () => boolean; resolve: () => void; reject: (error: Error) => void };
++    const encoder = new TextEncoder();
++    const pending: Entry[] = [];
++    let bytes = 0;
++    let pumping = false;
++    let stopped: Error | undefined;
++    const close = (error = new Error('Listen writer closed')) => {
++        if (stopped !== undefined) return;
++        stopped = error;
++        for (const entry of pending.splice(0)) entry.reject(error);
++        bytes = 0;
++    };
++    const pump = async () => {
++        if (pumping || stopped !== undefined) return;
++        pumping = true;
++        try {
++            while (pending.length > 0 && stopped === undefined) {
++                const entry = pending[0]!;
++                if (entry.isCurrent?.() !== false) await send(JSON.parse(entry.serialized) as JSONRPCMessage);
++                if (stopped !== undefined) break;
++                pending.shift();
++                bytes -= entry.bytes;
++                entry.resolve();
++            }
++        } catch (error_) {
++            if (stopped === undefined) {
++                const error = error_ instanceof Error ? error_ : new Error(String(error_));
++                close(error);
++                onFailure(error);
++            }
++        } finally {
++            pumping = false;
++        }
++    };
++    return {
++        close,
++        get busy() {
++            return pending.length > 0;
++        },
++        send(message: JSONRPCMessage, isCurrent?: () => boolean): Promise<void> {
++            if (stopped !== undefined) return Promise.reject(stopped);
++            const serialized = JSON.stringify(message);
++            const size = encoder.encode(serialized).byteLength + 1;
++            if (pending.length >= MAX_MESSAGES || bytes + size > MAX_BYTES) {
++                const error = new Error('Subscription output buffer exceeded');
++                close(error);
++                onFailure(error);
++                return Promise.reject(error);
++            }
++            return new Promise<void>((resolve, reject) => {
++                // Retain the measured wire value, not mutable source objects.
++                pending.push({ serialized, bytes: size, isCurrent, resolve, reject });
++                bytes += size;
++                void pump();
++            });
++        }
++    };
++}
+diff --git a/packages/server/src/server/serveStdio.ts b/packages/server/src/server/serveStdio.ts
+index 39e5fd6c..18cf00b1 100644
+--- a/packages/server/src/server/serveStdio.ts
++++ b/packages/server/src/server/serveStdio.ts
+@@ -77,9 +77,11 @@ import {
+ 
+ import type { McpServerFactory } from './createMcpHandler';
+ import { DEFAULT_MAX_SUBSCRIPTIONS, StdioListenRouter } from './listenRouter';
++import { createListenWriter } from './listenWriter';
+ import { McpServer } from './mcp';
+ import type { Server } from './server';
+ import { installModernOnlyHandlers, serverIdentityOf } from './server';
++import type { ListenExtension } from './serverEventBus';
+ import { StdioServerTransport } from './stdio';
+ 
+ /** Options for {@linkcode serveStdio}. */
+@@ -115,6 +117,16 @@ export interface ServeStdioOptions {
+      * @default 1024
+      */
+     maxSubscriptions?: number;
++    /**
++     * Extensions that honor their own fields of the `subscriptions/listen`
++     * filter (for example the Tasks extension's `taskIds`) and deliver their
++     * own notifications. On a modern connection, a notification the pinned
++     * instance sends with a method an extension declares is routed like a
++     * change notification: delivered, stamped, to each subscription the
++     * extension accepts it on, and dropped when none does. See
++     * {@linkcode ListenExtension}.
++     */
++    listenExtensions?: readonly ListenExtension[];
+ }
+ 
+ /** The handle returned by {@linkcode serveStdio}. */
+@@ -412,7 +424,22 @@ export function serveStdio(factory: McpServerFactory, options: ServeStdioOptions
+      * change notifications pass straight through (the 2025 unsolicited
+      * delivery model is unchanged).
+      */
+-    const listenRouter = new StdioListenRouter(options.maxSubscriptions ?? DEFAULT_MAX_SUBSCRIPTIONS);
++    const listenRouter = new StdioListenRouter(
++        options.maxSubscriptions ?? DEFAULT_MAX_SUBSCRIPTIONS,
++        undefined,
++        undefined,
++        options.listenExtensions,
++        reportError
++    );
++    const listenWriter = createListenWriter(
++        message => wire.send(message),
++        error => {
++            reportError(error);
++            // A blocked shared wire cannot carry further listen results reliably.
++            // Close abruptly so every attached source is cancelled immediately.
++            void closeAll(false);
++        }
++    );
+ 
+     /** Outbound intercept installed on a modern instance's channel. */
+     const modernOutboundIntercept = (message: JSONRPCMessage): 'handled' | undefined => {
+@@ -425,7 +452,10 @@ export function serveStdio(factory: McpServerFactory, options: ServeStdioOptions
+         // change type unsolicited). Nothing else from the instance is
+         // affected.
+         for (const stamped of routed) {
+-            void wire.send({ jsonrpc: '2.0', ...stamped }).catch(error => reportError(toError(error)));
++            const subscriptionId = stamped.params._meta?.['io.modelcontextprotocol/subscriptionId'] as RequestId;
++            void listenWriter
++                .send({ jsonrpc: '2.0', ...stamped }, listenRouter.current(subscriptionId))
++                .catch(error => reportError(toError(error)));
+         }
+         return 'handled';
+     };
+@@ -463,11 +493,40 @@ export function serveStdio(factory: McpServerFactory, options: ServeStdioOptions
+                 });
+                 reply = { jsonrpc: '2.0' as const, id: message.id, error: { code: error.code, message: error.message, data: error.data } };
+             } else {
+-                reply = listenRouter.serve(message);
++                const pending = listenRouter.serveAsync(message, (body, current) => {
++                    return listenWriter.send('jsonrpc' in body ? body : { jsonrpc: '2.0', ...body }, current).catch(error => {
++                        if (current?.() !== false) listenRouter.cancel(message.id);
++                        reportError(toError(error));
++                    });
++                });
++                const currentSubscription = listenRouter.current(message.id);
++                // The ordered inbound pump must remain free to process a cancel
++                // while a source is opening. The router already reserved the
++                // subscription and owns setup cancellation/late disposal.
++                void pending
++                    .then(async response => {
++                        if (isTornDown()) {
++                            listenRouter.cancel(message.id);
++                            return;
++                        }
++                        await listenWriter.send(
++                            'error' in response ? response : { jsonrpc: '2.0', ...response },
++                            'error' in response ? undefined : currentSubscription
++                        );
++                        if (!('error' in response)) listenRouter.acknowledged(message.id);
++                    })
++                    .catch(error => {
++                        listenRouter.cancel(message.id);
++                        reportError(toError(error));
++                    });
++                return true;
++            }
++            try {
++                await wire.send(reply);
++            } catch (error) {
++                listenRouter.cancel(message.id);
++                reportError(toError(error));
+             }
+-            await wire
+-                .send('error' in reply ? reply : { jsonrpc: '2.0', method: reply.method, params: reply.params })
+-                .catch(error => reportError(toError(error)));
+             return true;
+         }
+         if (isJSONRPCNotification(message) && message.method === 'notifications/cancelled') {
+@@ -781,7 +840,7 @@ export function serveStdio(factory: McpServerFactory, options: ServeStdioOptions
+         }
+     };
+ 
+-    const closeAll = async (): Promise<void> => {
++    const closeAll = async (graceful = true): Promise<void> => {
+         if (closing || state.phase === 'closed') {
+             return;
+         }
+@@ -793,9 +852,24 @@ export function serveStdio(factory: McpServerFactory, options: ServeStdioOptions
+         // (the spec's graceful-close signal — `SubscriptionsListenResult`)
+         // before the wire is closed, so the client distinguishes graceful end
+         // from a transport drop.
+-        for (const result of listenRouter.teardownAll()) {
+-            await wire.send(result).catch(error => reportError(toError(error)));
++        const endings = listenRouter.teardownAll();
++        queue.length = 0;
++        // Already backpressured output must not hold shutdown open. Otherwise
++        // allow a short bounded interval for the normal graceful-close results.
++        if (graceful && !listenWriter.busy) {
++            let timer: ReturnType<typeof setTimeout> | undefined;
++            try {
++                await Promise.race([
++                    Promise.all(endings.map(result => listenWriter.send(result))).catch(error => reportError(toError(error))),
++                    new Promise<void>(resolve => {
++                        timer = setTimeout(resolve, 1000);
++                    })
++                ]);
++            } finally {
++                if (timer !== undefined) clearTimeout(timer);
++            }
+         }
++        listenWriter.close();
+         if (current.phase === 'probe' || current.phase === 'pinned') {
+             await current.instance.product.close().catch(error => reportError(toError(error)));
+         }
+@@ -819,6 +893,11 @@ export function serveStdio(factory: McpServerFactory, options: ServeStdioOptions
+         closing = true;
+         const current = state;
+         state = { phase: 'closed' };
++        // EOF is an abrupt transport close: dispose both acknowledged streams
++        // and pending opens, without attempting to send graceful-close frames.
++        listenRouter.teardownAll();
++        listenWriter.close();
++        queue.length = 0;
+         if (current.phase === 'probe' || current.phase === 'pinned') {
+             void current.instance.product.close().catch(error => reportError(toError(error)));
+         }
+diff --git a/packages/server/src/server/serverEventBus.ts b/packages/server/src/server/serverEventBus.ts
+index 580cd8bc..88e5b37a 100644
+--- a/packages/server/src/server/serverEventBus.ts
++++ b/packages/server/src/server/serverEventBus.ts
+@@ -1,4 +1,10 @@
+-import type { JSONRPCNotification, ServerCapabilities, SubscriptionFilter } from '@modelcontextprotocol/core-internal';
++import type {
++    AuthInfo,
++    JSONRPCNotification,
++    JSONRPCRequest,
++    ServerCapabilities,
++    SubscriptionFilter
++} from '@modelcontextprotocol/core-internal';
+ 
+ /**
+  * A change event a server publishes for delivery on open `subscriptions/listen`
+@@ -8,6 +14,9 @@ import type { JSONRPCNotification, ServerCapabilities, SubscriptionFilter } from
+  * - `prompts_list_changed` → `notifications/prompts/list_changed`
+  * - `resources_list_changed` → `notifications/resources/list_changed`
+  * - `resource_updated` → `notifications/resources/updated` (carries the URI)
++ * - `extension` → its own `method`, with `params` forwarded as-is; delivered
++ *   only to subscriptions whose honored filter a {@linkcode ListenExtension}
++ *   declaring that method accepts
+  *
+  * The bus carries the event and any forwarded notification params — the
+  * entry's listen router owns subscription-id stamping and per-stream filtering.
+@@ -17,11 +26,242 @@ export type ServerEvent = (
+     | { kind: 'prompts_list_changed' }
+     | { kind: 'resources_list_changed' }
+     | { kind: 'resource_updated'; uri: string }
++    | { kind: 'extension'; method: string }
+ ) & {
+     /** Forwarded notification params; the router stamps its own subscription ID and the event's resource URI. */
+     params?: JSONRPCNotification['params'];
+ };
+ 
++/** A {@linkcode ServerEvent} published by an extension (for example the Tasks extension's status notifications). */
++export type ExtensionServerEvent = Extract<ServerEvent, { kind: 'extension' }>;
++
++/** Request-bound setup for an extension's notifications on one listen stream. */
++export interface ListenExtensionContext {
++    readonly request: JSONRPCRequest;
++    readonly requestInfo?: Request;
++    readonly authInfo?: AuthInfo;
++    /** Aborted on client disconnect, cancellation, setup failure or server close. */
++    readonly signal: AbortSignal;
++    /** End this subscription when its authorized source can no longer serve it. */
++    close(): void;
++    /** Finish after acknowledgment and delivery of already published notifications. */
++    finish(): void;
++    /** Deliver only to this subscription. The SDK buffers until its acknowledgment. */
++    publish(event: ExtensionServerEvent): void;
++}
++
++export interface OpenedListenExtension {
++    /** The exact accepted extension filter; core fields cannot be overwritten. */
++    readonly notifications: Readonly<Record<string, unknown>>;
++    /** Idempotent cleanup. Also called when setup finishes after cancellation. */
++    dispose?(): void | Promise<void>;
++}
++
++/**
++ * An extension point for `subscriptions/listen`: lets an extension honor its
++ * own fields of the requested filter (for example the Tasks extension's
++ * `notifications.taskIds`) and deliver its own notifications on the stream.
++ *
++ * The serving entry keeps owning the wire: ack-first, subscription-id
++ * stamping, keepalive, subscription limits and teardown. Both
++ * `createMcpHandler` and `serveStdio` accept a `listenExtensions` option.
++ *
++ * Rules the entry enforces:
++ *
++ * - The core filter is honored first, against the server's capabilities.
++ *   An extension cannot add or change a core field
++ *   (`toolsListChanged`, `promptsListChanged`, `resourcesListChanged`,
++ *   `resourceSubscriptions`); such keys in its result are dropped and reported.
++ * - The fields an extension honors appear in the acknowledged filter and are
++ *   kept on the subscription's record; {@linkcode accepts} sees exactly them.
++ * - If {@linkcode honor} throws, its fields are left out of both the ack and
++ *   the subscription record (so its events are never delivered on that
++ *   subscription), the error is reported through `onerror`, and the core
++ *   subscription is served as usual.
++ * - {@linkcode accepts} is consulted only for `extension` events whose method
++ *   is in {@linkcode methods}; core change events never reach it. If it
++ *   throws, the event is not delivered on that subscription and the error is
++ *   reported.
++ */
++export interface ListenExtension {
++    /** A name for error reports (for example `'io.modelcontextprotocol/tasks'`). */
++    readonly name: string;
++    /** The notification methods this extension delivers through listen streams. */
++    readonly methods: readonly string[];
++    /**
++     * Check the shape of this extension's fields in the requested filter.
++     * Return an error message to reject the whole listen with `-32602`
++     * (a malformed field is a client error), or `undefined` when they are
++     * absent or well-formed.
++     */
++    validate?(requested: Readonly<Record<string, unknown>>): string | undefined;
++    /**
++     * The fields of the requested filter this extension honors, given the
++     * server's capabilities. `requested` is the raw `params.notifications`
++     * object of the listen request. Return `undefined` (or an empty object)
++     * to honor nothing.
++     */
++    honor?(requested: Readonly<Record<string, unknown>>, capabilities: ServerCapabilities): Record<string, unknown> | undefined;
++    /**
++     * Alternative to synchronous honor(): authorize and attach a source for this
++     * request. The SDK acknowledges only after setup succeeds. Publish through
++     * context, never the shared event bus: these notifications are request scoped.
++     * Implement exactly one of honor/open. A failed open rejects the listen.
++     */
++    open?(
++        requested: Readonly<Record<string, unknown>>,
++        capabilities: ServerCapabilities,
++        context: ListenExtensionContext
++    ): OpenedListenExtension | undefined | Promise<OpenedListenExtension | undefined>;
++    /** Whether an event of one of {@linkcode methods} matches the fields this extension honored on a subscription. */
++    accepts(honored: Readonly<Record<string, unknown>>, event: ExtensionServerEvent): boolean;
++}
++
++/**
++ * What one subscription honors: the core filter and each extension's fields.
++ * @internal
++ */
++export interface HonoredListen {
++    /** The acknowledged filter: the core fields plus every extension's fields. */
++    readonly ack: Record<string, unknown>;
++    /** The honored core filter. */
++    readonly core: SubscriptionFilter;
++    /** The fields each extension honored (extensions that honored nothing are absent). */
++    readonly extensions: ReadonlyArray<{ readonly extension: ListenExtension; readonly honored: Readonly<Record<string, unknown>> }>;
++}
++
++const CORE_FILTER_KEYS: ReadonlySet<string> = new Set([
++    'toolsListChanged',
++    'promptsListChanged',
++    'resourcesListChanged',
++    'resourceSubscriptions'
++]);
++
++/** The core change notifications `subscriptions/listen` filters itself; no extension may declare one. */
++export const CORE_CHANGE_NOTIFICATION_METHODS: ReadonlySet<string> = new Set([
++    'notifications/tools/list_changed',
++    'notifications/prompts/list_changed',
++    'notifications/resources/list_changed',
++    'notifications/resources/updated'
++]);
++
++/**
++ * Throws when an extension declares a core change notification, or two
++ * extensions declare the same method. Called when a router is built, so a
++ * misconfiguration fails at startup rather than per request.
++ * @internal
++ */
++export function assertListenExtensions(extensions: readonly ListenExtension[]): void {
++    const declared = new Map<string, string>();
++    for (const extension of extensions) {
++        if ((extension.honor === undefined) === (extension.open === undefined)) {
++            throw new Error(`listenExtensions: extension '${extension.name}' must implement exactly one of honor/open`);
++        }
++        for (const method of extension.methods) {
++            if (CORE_CHANGE_NOTIFICATION_METHODS.has(method)) {
++                throw new Error(`listenExtensions: extension '${extension.name}' cannot declare the core notification ${method}`);
++            }
++            const owner = declared.get(method);
++            if (owner !== undefined) {
++                throw new Error(`listenExtensions: ${method} is declared by both '${owner}' and '${extension.name}'`);
++            }
++            declared.set(method, extension.name);
++        }
++    }
++}
++
++function toError(error: unknown): Error {
++    return error instanceof Error ? error : new Error(String(error));
++}
++
++/**
++ * Check every extension's fields in a requested filter. Returns the first
++ * error message (the entry answers `-32602`), or `undefined`.
++ * @internal
++ */
++export function validateListenExtensions(
++    requested: Readonly<Record<string, unknown>>,
++    extensions: readonly ListenExtension[],
++    onerror?: (error: Error) => void
++): string | undefined {
++    for (const extension of extensions) {
++        if (extension.validate === undefined) continue;
++        let message: string | undefined;
++        try {
++            message = extension.validate(requested);
++        } catch (error) {
++            onerror?.(new Error(`subscriptions/listen: extension '${extension.name}' validate() threw: ${toError(error).message}`));
++            continue;
++        }
++        if (message !== undefined) return message;
++    }
++    return undefined;
++}
++
++/**
++ * Honor a requested filter: the core subset first (see
++ * {@linkcode honoredSubset}), then each extension's fields. See
++ * {@linkcode ListenExtension} for the rules.
++ * @internal
++ */
++export function honorListen(
++    filter: SubscriptionFilter,
++    requested: Readonly<Record<string, unknown>>,
++    capabilities: ServerCapabilities,
++    extensions: readonly ListenExtension[],
++    onerror?: (error: Error) => void,
++    opened?: ReadonlyMap<ListenExtension, Readonly<Record<string, unknown>> | undefined>
++): HonoredListen {
++    const core = honoredSubset(filter, capabilities);
++    const ack: Record<string, unknown> = { ...core };
++    const honoredExtensions: Array<{ extension: ListenExtension; honored: Record<string, unknown> }> = [];
++    for (const extension of extensions) {
++        let result: Record<string, unknown> | undefined;
++        try {
++            result = extension.open === undefined ? extension.honor?.(requested, capabilities) : opened?.get(extension);
++        } catch (error) {
++            const reason = toError(error).message;
++            const message = `subscriptions/listen: extension '${extension.name}' honor() threw; its fields are not honored: ${reason}`;
++            onerror?.(new Error(message));
++            continue;
++        }
++        if (result === undefined) continue;
++        const honored: Record<string, unknown> = {};
++        for (const [key, value] of Object.entries(result)) {
++            if (value === undefined) continue;
++            if (CORE_FILTER_KEYS.has(key) || Object.hasOwn(ack, key)) {
++                onerror?.(new Error(`subscriptions/listen: extension '${extension.name}' cannot honor '${key}'; the field is dropped`));
++                continue;
++            }
++            honored[key] = value;
++            ack[key] = value;
++        }
++        if (Object.keys(honored).length > 0) honoredExtensions.push({ extension, honored });
++    }
++    return { ack, core, extensions: honoredExtensions };
++}
++
++/**
++ * Whether a subscription accepts an event: core events go through
++ * {@linkcode listenFilterAccepts}; extension events through the extensions
++ * that declare the event's method and honored fields on this subscription.
++ * @internal
++ */
++export function honoredListenAccepts(listen: HonoredListen, event: ServerEvent, onerror?: (error: Error) => void): boolean {
++    if (event.kind !== 'extension') return listenFilterAccepts(listen.core, event);
++    for (const { extension, honored } of listen.extensions) {
++        // Request-bound sources use their context.publish, never a shared bus.
++        if (extension.open !== undefined) continue;
++        if (!extension.methods.includes(event.method)) continue;
++        try {
++            if (extension.accepts(honored, event)) return true;
++        } catch (error) {
++            onerror?.(new Error(`subscriptions/listen: extension '${extension.name}' accepts() threw: ${toError(error).message}`));
++        }
++    }
++    return false;
++}
++
+ /**
+  * The server-side change-event seam for `subscriptions/listen`.
+  *
+@@ -106,6 +346,11 @@ export interface ServerNotifier {
+     resourcesChanged(): void;
+     /** Publish `notifications/resources/updated` for `uri` to every open subscription that opted in to that URI. */
+     resourceUpdated(uri: string): void;
++    /**
++     * Publish an extension notification (`method` with `params`) to every open
++     * subscription a {@linkcode ListenExtension} declaring `method` accepts.
++     */
++    extension(method: string, params?: JSONRPCNotification['params']): void;
+ }
+ 
+ /** Build a {@linkcode ServerNotifier} over a bus. */
+@@ -114,7 +359,9 @@ export function createServerNotifier(bus: ServerEventBus): ServerNotifier {
+         toolsChanged: () => bus.publish({ kind: 'tools_list_changed' }),
+         promptsChanged: () => bus.publish({ kind: 'prompts_list_changed' }),
+         resourcesChanged: () => bus.publish({ kind: 'resources_list_changed' }),
+-        resourceUpdated: (uri: string) => bus.publish({ kind: 'resource_updated', uri })
++        resourceUpdated: (uri: string) => bus.publish({ kind: 'resource_updated', uri }),
++        extension: (method: string, params?: JSONRPCNotification['params']) =>
++            bus.publish({ kind: 'extension', method, ...(params !== undefined && { params }) })
+     };
+ }
+ 
+@@ -123,7 +370,8 @@ export function createServerNotifier(bus: ServerEventBus): ServerNotifier {
+  *
+  * Pure: no I/O, no mutation. The filter governs ONLY the four
+  * subscription-gated change types — non-gated notifications never reach the
+- * bus and are not modeled here.
++ * bus and are not modeled here. An `extension` event never matches the core
++ * filter; {@linkcode ListenExtension.accepts} decides those.
+  *
+  * `resource_updated` matches only when `resourceSubscriptions` is present and
+  * contains the event's URI exactly (per the spec: "for these resource URIs").
+@@ -142,6 +390,9 @@ export function listenFilterAccepts(filter: SubscriptionFilter, event: ServerEve
+         case 'resource_updated': {
+             return filter.resourceSubscriptions !== undefined && filter.resourceSubscriptions.includes(event.uri);
+         }
++        case 'extension': {
++            return false;
++        }
+     }
+ }
+ 
+@@ -194,5 +445,8 @@ export function serverEventToNotification(event: ServerEvent): { method: string;
+         case 'resource_updated': {
+             return { method: 'notifications/resources/updated', params: { ...event.params, uri: event.uri } };
+         }
++        case 'extension': {
++            return { method: event.method, ...(event.params !== undefined && { params: event.params }) };
++        }
+     }
+ }
+diff --git a/packages/server/src/server/stdio.ts b/packages/server/src/server/stdio.ts
+index 4895359a..dd3284b9 100644
+--- a/packages/server/src/server/stdio.ts
++++ b/packages/server/src/server/stdio.ts
+@@ -36,6 +36,7 @@ export class StdioServerTransport implements Transport {
+     private _readBuffer: ReadBuffer;
+     private _started = false;
+     private _closed = false;
++    private readonly _pendingSends = new Set<(error: Error) => void>();
+ 
+     constructor(
+         private _stdin: Readable = process.stdin,
+@@ -81,6 +82,7 @@ export class StdioServerTransport implements Transport {
+             // listener attached.
+             return;
+         }
++        for (const reject of this._pendingSends) reject(error);
+         this.onerror?.(error);
+         this.close().catch(() => {
+             // Ignore errors during close — we're already in an error path
+@@ -156,6 +158,9 @@ export class StdioServerTransport implements Transport {
+             return;
+         }
+         this._closed = true;
++        // A closed input can never drain a blocked output. Settle writes and
++        // remove their drain/error listeners instead of retaining the transport.
++        for (const reject of this._pendingSends) reject(new Error('StdioServerTransport is closed'));
+ 
+         // Remove our event listeners first
+         this._stdin.off('data', this._ondata);
+@@ -194,6 +199,7 @@ export class StdioServerTransport implements Transport {
+             const onError = (error: Error) => {
+                 if (settled) return;
+                 settled = true;
++                this._pendingSends.delete(onError);
+                 this._stdout.off('error', onError);
+                 this._stdout.off('drain', onDrain);
+                 reject(error);
+@@ -201,16 +207,26 @@ export class StdioServerTransport implements Transport {
+             const onDrain = () => {
+                 if (settled) return;
+                 settled = true;
++                this._pendingSends.delete(onError);
+                 this._stdout.off('error', onError);
+                 this._stdout.off('drain', onDrain);
+                 resolve();
+             };
+ 
++            this._pendingSends.add(onError);
+             this._stdout.once('error', onError);
+ 
+-            if (this._stdout.write(json)) {
++            let accepted: boolean;
++            try {
++                accepted = this._stdout.write(json);
++            } catch (error) {
++                onError(error instanceof Error ? error : new Error(String(error)));
++                return;
++            }
++            if (accepted) {
+                 if (settled) return;
+                 settled = true;
++                this._pendingSends.delete(onError);
+                 this._stdout.off('error', onError);
+                 resolve();
+             } else if (!settled) {
+diff --git a/packages/server/test/server/listenExtensions.test.ts b/packages/server/test/server/listenExtensions.test.ts
+new file mode 100644
+index 00000000..dad0417c
+--- /dev/null
++++ b/packages/server/test/server/listenExtensions.test.ts
+@@ -0,0 +1,937 @@
++/**
++ * `listenExtensions` — extension fields of the `subscriptions/listen` filter
++ * (for example the Tasks extension's `taskIds`) on both serving entries.
++ *
++ * Covers: the extension's honored fields in the ack and on the subscription
++ * record, delivery of extension events filtered per subscription, core
++ * capability narrowing that an extension cannot undo, a throwing `honor()`
++ * (ack without its fields, core still served, its events not delivered,
++ * reported), `validate()` rejecting with -32602, and stdio routing of an
++ * instance's extension notifications.
++ */
++import { PassThrough, Writable } from 'node:stream';
++
++import type { JSONRPCMessage, JSONRPCNotification, JSONRPCRequest, Transport } from '@modelcontextprotocol/core-internal';
++import {
++    CLIENT_CAPABILITIES_META_KEY,
++    CLIENT_INFO_META_KEY,
++    InMemoryTransport,
++    ProtocolError,
++    ProtocolErrorCode,
++    PROTOCOL_VERSION_META_KEY,
++    SUBSCRIPTION_ID_META_KEY
++} from '@modelcontextprotocol/core-internal';
++import { describe, expect, it, vi } from 'vitest';
++import * as z from 'zod/v4';
++
++import { createMcpHandler } from '../../src/server/createMcpHandler';
++import { McpServer } from '../../src/server/mcp';
++import type { ListenExtension, ListenExtensionContext, OpenedListenExtension } from '../../src/server/serverEventBus';
++import { serveStdio } from '../../src/server/serveStdio';
++import { StdioServerTransport } from '../../src/server/stdio';
++
++const MODERN_REVISION = '2026-07-28';
++const ENVELOPE = {
++    [PROTOCOL_VERSION_META_KEY]: MODERN_REVISION,
++    [CLIENT_INFO_META_KEY]: { name: 'listen-extensions-test', version: '1' },
++    [CLIENT_CAPABILITIES_META_KEY]: {}
++};
++const TASK_STATUS = 'notifications/tasks';
++
++/** A Tasks-style extension: honors `taskIds`, delivers status events for those tasks. */
++function tasksExtension(overrides: Partial<ListenExtension> = {}): ListenExtension {
++    return {
++        name: 'tasks',
++        methods: [TASK_STATUS],
++        validate: requested =>
++            requested.taskIds === undefined || (Array.isArray(requested.taskIds) && requested.taskIds.every(id => typeof id === 'string'))
++                ? undefined
++                : "'taskIds' must be an array of strings",
++        honor: requested => {
++            const taskIds = requested.taskIds;
++            return Array.isArray(taskIds) && taskIds.length > 0 ? { taskIds: [...(taskIds as string[])] } : undefined;
++        },
++        accepts: (honored, event) => (honored.taskIds as string[]).includes(event.params?.taskId as string),
++        ...overrides
++    };
++}
++
++function listenBody(id: string | number, filter: Record<string, unknown>): JSONRPCRequest {
++    return { jsonrpc: '2.0', id, method: 'subscriptions/listen', params: { _meta: ENVELOPE, notifications: filter } };
++}
++
++function listenRequest(id: string | number, filter: Record<string, unknown>): Request {
++    return new Request('http://localhost/mcp', {
++        method: 'POST',
++        headers: {
++            'Content-Type': 'application/json',
++            Accept: 'application/json, text/event-stream',
++            'mcp-protocol-version': MODERN_REVISION,
++            'mcp-method': 'subscriptions/listen'
++        },
++        body: JSON.stringify(listenBody(id, filter))
++    });
++}
++
++/** Incremental SSE reader: `next()` resolves with the next `event: message` payload. */
++function sseReader(response: Response) {
++    const reader = response.body!.getReader();
++    const decoder = new TextDecoder();
++    let buffer = '';
++    const queued: unknown[] = [];
++    return {
++        async next(): Promise<unknown> {
++            while (queued.length === 0) {
++                const { done, value } = await reader.read();
++                if (done) return undefined;
++                buffer += decoder.decode(value, { stream: true });
++                let idx: number;
++                while ((idx = buffer.indexOf('\n\n')) !== -1) {
++                    const frame = buffer.slice(0, idx);
++                    buffer = buffer.slice(idx + 2);
++                    const dataLine = frame.split('\n').find(l => l.startsWith('data: '));
++                    if (dataLine) queued.push(JSON.parse(dataLine.slice(6)));
++                }
++            }
++            return queued.shift();
++        },
++        cancel: () => reader.cancel()
++    };
++}
++
++function httpHandler(listenExtensions: ListenExtension[], errors: Error[] = [], capabilities?: Record<string, unknown>) {
++    return createMcpHandler(
++        () =>
++            new McpServer(
++                { name: 'listen-extensions-server', version: '1' },
++                { capabilities: capabilities ?? { tools: { listChanged: true }, prompts: { listChanged: true } } }
++            ),
++        { keepAliveMs: 0, listenExtensions, onerror: error => errors.push(error) }
++    );
++}
++
++function deferred<T>() {
++    let resolve!: (value: T) => void;
++    let reject!: (reason: unknown) => void;
++    const promise = new Promise<T>((yes, no) => {
++        resolve = yes;
++        reject = no;
++    });
++    return { promise, resolve, reject };
++}
++
++describe('request-scoped listen setup', () => {
++    it('finishes a source opened with its final snapshot only after ack and delivery', async () => {
++        const handler = httpHandler([
++            tasksExtension({
++                honor: undefined,
++                open: async (_filter, _caps, context) => {
++                    context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'one', status: 'completed' } });
++                    context.finish();
++                    return { notifications: { taskIds: ['one'] } };
++                }
++            })
++        ]);
++        const stream = sseReader(await handler.fetch(listenRequest(1, { taskIds: ['one'] })));
++        expect(await stream.next()).toMatchObject({ method: 'notifications/subscriptions/acknowledged' });
++        expect(await stream.next()).toMatchObject({ method: TASK_STATUS, params: { status: 'completed' } });
++        expect(await stream.next()).toMatchObject({ id: 1, result: { resultType: 'complete' } });
++        expect(await stream.next()).toBeUndefined();
++        await handler.close();
++    });
++
++    it.each([false, true])('drains final stdio output unless the caller cancels, cancel=%s', async cancel => {
++        const entered = deferred<ListenExtensionContext>();
++        let blockNext = false,
++            release: (() => void) | undefined;
++        const input = new PassThrough();
++        const frames: Array<JSONRPCMessage> = [];
++        const output = new Writable({
++            highWaterMark: 1,
++            write(chunk, _encoding, callback) {
++                frames.push(JSON.parse(String(chunk)));
++                if (blockNext) {
++                    blockNext = false;
++                    release = callback;
++                } else callback();
++            }
++        });
++        const handle = serveStdio(() => new McpServer({ name: 'final-output', version: '1' }), {
++            transport: new StdioServerTransport(input, output),
++            listenExtensions: [
++                tasksExtension({
++                    honor: undefined,
++                    open: (_filter, _caps, context) => {
++                        entered.resolve(context);
++                        return { notifications: { taskIds: ['one'] } };
++                    }
++                })
++            ]
++        });
++        try {
++            input.write(JSON.stringify(listenBody(1, { taskIds: ['one'] })) + '\n');
++            const context = await entered.promise;
++            await vi.waitFor(() => expect(frames).toHaveLength(1));
++            await new Promise<void>(resolve => setImmediate(resolve));
++            blockNext = true;
++            context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'one', status: 'working' } });
++            await vi.waitFor(() => expect(release).toBeDefined());
++            context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'one', status: 'completed' } });
++            context.finish();
++            if (cancel) {
++                input.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } }) + '\n');
++                await vi.waitFor(() => expect(context.signal.aborted).toBe(true));
++            }
++            release!();
++            release = undefined;
++            if (!cancel) await vi.waitFor(() => expect(frames).toHaveLength(4));
++            await handle.close();
++            expect(frames.map(frame => ('method' in frame ? (frame.params?.status ?? 'ack') : 'close'))).toEqual(
++                cancel ? ['ack', 'working'] : ['ack', 'working', 'completed', 'close']
++            );
++        } finally {
++            release?.();
++            await handle.close();
++            input.destroy();
++            output.destroy();
++        }
++    });
++
++    it('preserves protocol setup errors and required capability data over HTTP', async () => {
++        const requiredCapabilities = { extensions: { 'io.modelcontextprotocol/tasks': {} } };
++        const handler = httpHandler([
++            tasksExtension({
++                honor: undefined,
++                open: async () => {
++                    throw new ProtocolError(ProtocolErrorCode.MissingRequiredClientCapability, 'Tasks required', { requiredCapabilities });
++                }
++            })
++        ]);
++        const response = await handler.fetch(listenRequest(1, { taskIds: ['one'] }));
++        expect(await response.json()).toMatchObject({
++            id: 1,
++            error: {
++                code: ProtocolErrorCode.MissingRequiredClientCapability,
++                message: 'Tasks required',
++                data: { requiredCapabilities }
++            }
++        });
++        await handler.close();
++    });
++
++    it('lets a lost source close only its own acknowledged stream', async () => {
++        const contexts: ListenExtensionContext[] = [];
++        const disposed: ListenExtensionContext[] = [];
++        const handler = httpHandler([
++            tasksExtension({
++                honor: undefined,
++                open: (_filter, _caps, context) => {
++                    contexts.push(context);
++                    return {
++                        notifications: { taskIds: ['shared'] },
++                        dispose: () => {
++                            disposed.push(context);
++                        }
++                    };
++                }
++            })
++        ]);
++        const a = sseReader(await handler.fetch(listenRequest(1, { taskIds: ['shared'] })));
++        const b = sseReader(await handler.fetch(listenRequest(2, { taskIds: ['shared'] })));
++        await a.next();
++        await b.next();
++        contexts[0]!.close();
++        contexts[0]!.close();
++        expect(await a.next()).toBeUndefined();
++        expect(disposed).toEqual([contexts[0]]);
++        expect(contexts[0]!.signal.aborted).toBe(true);
++        expect(contexts[1]!.signal.aborted).toBe(false);
++        contexts[1]!.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'shared', status: 'working' } });
++        expect(await b.next()).toMatchObject({ method: TASK_STATUS });
++        await handler.close();
++    });
++
++    it('keeps prototype-based extensions scoped to their original instance', async () => {
++        class Source implements ListenExtension {
++            name = 'class-source';
++            methods = [TASK_STATUS];
++            contexts = new Map<string, ListenExtensionContext>();
++            accepts = (filter: Readonly<Record<string, unknown>>, event: { params?: Record<string, unknown> }) =>
++                (filter.taskIds as string[]).includes(event.params?.taskId as string);
++            async open(_filter: Readonly<Record<string, unknown>>, _caps: unknown, context: ListenExtensionContext) {
++                this.contexts.set(context.requestInfo!.headers.get('x-test-principal')!, context);
++                return { notifications: { taskIds: ['shared'] } };
++            }
++        }
++        const source = new Source();
++        const handler = httpHandler([source]);
++        const streams = [];
++        for (const principal of ['a', 'b']) {
++            const request = listenRequest(1, { taskIds: ['shared'] });
++            request.headers.set('x-test-principal', principal);
++            const stream = sseReader(await handler.fetch(request));
++            expect(await stream.next()).toMatchObject({ params: { notifications: { taskIds: ['shared'] } } });
++            streams.push(stream);
++        }
++        handler.notify.extension(TASK_STATUS, { taskId: 'shared', privateValue: 'broadcast' });
++        for (const [principal, context] of source.contexts) {
++            context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'shared', privateValue: principal } });
++        }
++        expect(await streams[0]!.next()).toMatchObject({ params: { privateValue: 'a' } });
++        expect(await streams[1]!.next()).toMatchObject({ params: { privateValue: 'b' } });
++        await handler.close();
++    });
++
++    it('discards an unread HTTP output queue and closes its source at the byte bound', async () => {
++        let context!: ListenExtensionContext;
++        let disposed = 0;
++        const handler = httpHandler([
++            tasksExtension({
++                honor: undefined,
++                open: (_filter, _caps, ctx) => {
++                    context = ctx;
++                    return {
++                        notifications: { taskIds: ['t1'] },
++                        dispose: () => {
++                            disposed++;
++                        }
++                    };
++                }
++            })
++        ]);
++        const response = await handler.fetch(listenRequest(1, { taskIds: ['t1'] }));
++        for (let i = 0; i < 4096; i++) {
++            context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 't1', text: 'x'.repeat(2048) } });
++        }
++        expect(context.signal.aborted).toBe(true);
++        expect(disposed).toBe(1);
++        await expect(response.body!.getReader().read()).rejects.toThrow('output buffer exceeded');
++        await handler.close();
++        expect(disposed).toBe(1);
++    });
++
++    it.each([false, true])('stdio EOF closes a source with pending setup=%s', async pendingSetup => {
++        const entered = deferred<ListenExtensionContext>();
++        const opened = deferred<OpenedListenExtension>();
++        let disposed = 0;
++        const resource = {
++            notifications: { taskIds: ['t1'] },
++            dispose: () => {
++                disposed++;
++            }
++        };
++        const input = new PassThrough();
++        const frames: string[] = [];
++        const output = new Writable({
++            write(chunk, _encoding, callback) {
++                frames.push(String(chunk));
++                callback();
++            }
++        });
++        const handle = serveStdio(() => new McpServer({ name: 'eof', version: '1' }), {
++            transport: new StdioServerTransport(input, output),
++            listenExtensions: [
++                tasksExtension({
++                    honor: undefined,
++                    open: (_filter, _caps, context) => {
++                        entered.resolve(context);
++                        return pendingSetup ? opened.promise : resource;
++                    }
++                })
++            ]
++        });
++        try {
++            input.write(JSON.stringify(listenBody(1, { taskIds: ['t1'] })) + '\n');
++            const context = await entered.promise;
++            if (!pendingSetup) await vi.waitFor(() => expect(frames.join('')).toContain('subscriptions/acknowledged'));
++            input.end();
++            await vi.waitFor(() => expect(context.signal.aborted).toBe(true));
++            opened.resolve(resource);
++            await vi.waitFor(() => expect(disposed).toBe(1));
++            await handle.close();
++            expect(disposed).toBe(1);
++        } finally {
++            opened.resolve(resource);
++            await handle.close();
++            input.destroy();
++            output.destroy();
++        }
++    });
++
++    it('serializes bounded stdio output while the consumer stops draining', async () => {
++        const entered = deferred<ListenExtensionContext>();
++        let blocked = false;
++        let disposed = 0;
++        const input = new PassThrough();
++        const frames: string[] = [];
++        const output = new Writable({
++            highWaterMark: 1,
++            write(chunk, _encoding, callback) {
++                frames.push(String(chunk));
++                if (!blocked) callback();
++            }
++        });
++        const handle = serveStdio(() => new McpServer({ name: 'backpressure', version: '1' }), {
++            transport: new StdioServerTransport(input, output),
++            listenExtensions: [
++                tasksExtension({
++                    honor: undefined,
++                    open: (_filter, _caps, context) => {
++                        entered.resolve(context);
++                        return {
++                            notifications: { taskIds: ['t1'] },
++                            dispose: () => {
++                                disposed++;
++                            }
++                        };
++                    }
++                })
++            ]
++        });
++        try {
++            input.write(JSON.stringify(listenBody(1, { taskIds: ['t1'] })) + '\n');
++            const context = await entered.promise;
++            await vi.waitFor(() => expect(frames.join('')).toContain('subscriptions/acknowledged'));
++            await new Promise<void>(resolve => setImmediate(resolve));
++            blocked = true;
++            const publish = () =>
++                context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 't1', text: 'x'.repeat(2048) } });
++            for (let i = 0; i < 128; i++) publish();
++            expect(output.writableLength).toBeLessThan(8192);
++            expect(output.listenerCount('drain')).toBeLessThanOrEqual(1);
++            publish();
++            expect(context.signal.aborted).toBe(true);
++            expect(disposed).toBe(1);
++            await vi.waitFor(() => expect(output.listenerCount('drain')).toBe(0));
++            await handle.close();
++        } finally {
++            await handle.close();
++            input.destroy();
++            output.destroy();
++        }
++    });
++
++    it('does not send queued output after cancellation and subscription ID reuse', async () => {
++        const contexts: ListenExtensionContext[] = [];
++        let blockNext = false;
++        let release!: () => void;
++        const input = new PassThrough();
++        const frames: string[] = [];
++        const output = new Writable({
++            highWaterMark: 1,
++            write(chunk, _encoding, callback) {
++                frames.push(String(chunk));
++                if (blockNext) {
++                    blockNext = false;
++                    release = callback;
++                } else callback();
++            }
++        });
++        const handle = serveStdio(() => new McpServer({ name: 'cancelled-output', version: '1' }), {
++            transport: new StdioServerTransport(input, output),
++            listenExtensions: [
++                tasksExtension({
++                    honor: undefined,
++                    open: (_filter, _caps, context) => {
++                        contexts.push(context);
++                        return { notifications: { taskIds: ['t1'] } };
++                    }
++                })
++            ]
++        });
++        const send = (message: JSONRPCMessage) => input.write(JSON.stringify(message) + '\n');
++        const publish = (context: ListenExtensionContext, value: string) =>
++            context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 't1', value } });
++        try {
++            send(listenBody(1, { taskIds: ['t1'] }));
++            await vi.waitFor(() => expect(frames.join('')).toContain('subscriptions/acknowledged'));
++            await new Promise<void>(resolve => setImmediate(resolve));
++            blockNext = true;
++            publish(contexts[0]!, 'already-written');
++            publish(contexts[0]!, 'obsolete-queued');
++            send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
++            await vi.waitFor(() => expect(contexts[0]!.signal.aborted).toBe(true));
++            send(listenBody(1, { taskIds: ['t1'] }));
++            await vi.waitFor(() => expect(contexts).toHaveLength(2));
++            release();
++            await vi.waitFor(() => expect(frames.filter(frame => frame.includes('subscriptions/acknowledged'))).toHaveLength(2));
++            publish(contexts[1]!, 'current');
++            await vi.waitFor(() => expect(frames.join('')).toContain('current'));
++            expect(frames.join('')).not.toContain('obsolete-queued');
++        } finally {
++            release?.();
++            await handle.close();
++            input.destroy();
++            output.destroy();
++        }
++    });
++
++    it('rejects a failed source setup and disposes another source that finishes later', async () => {
++        const late = deferred<OpenedListenExtension>();
++        let disposed = 0;
++        const handler = httpHandler([
++            tasksExtension({ honor: undefined, open: () => late.promise }),
++            tasksExtension({
++                name: 'failing-source',
++                methods: ['notifications/other'],
++                honor: undefined,
++                open: async () => {
++                    throw new Error('source is unavailable');
++                }
++            })
++        ]);
++        expect(await (await handler.fetch(listenRequest(1, { taskIds: ['t1'] }))).json()).toMatchObject({
++            error: { code: -32_603, message: 'Subscription setup failed' }
++        });
++        late.resolve({
++            notifications: { taskIds: ['t1'] },
++            dispose: () => {
++                disposed++;
++            }
++        });
++        await new Promise<void>(resolve => setImmediate(resolve));
++        expect(disposed).toBe(1);
++        await handler.close();
++    });
++
++    it('rejects one oversized source notification before acknowledging', async () => {
++        let disposed = 0;
++        const handler = httpHandler([
++            tasksExtension({
++                honor: undefined,
++                open: (_filter, _caps, context) => {
++                    context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 't1', text: 'x'.repeat(1024 * 1024) } });
++                    return {
++                        notifications: { taskIds: ['t1'] },
++                        dispose: () => {
++                            disposed++;
++                        }
++                    };
++                }
++            })
++        ]);
++        expect(await (await handler.fetch(listenRequest(1, { taskIds: ['t1'] }))).json()).toMatchObject({ error: { code: -32_603 } });
++        expect(disposed).toBe(1);
++        await handler.close();
++    });
++
++    it('acknowledges the accepted filter before source events and isolates identical task ids across requests', async () => {
++        const contexts = new Map<string, ListenExtensionContext>();
++        const disposed: string[] = [];
++        const extension = tasksExtension({
++            honor: undefined,
++            open: async (_filter, _capabilities, context) => {
++                const principal = context.requestInfo!.headers.get('x-test-principal')!;
++                contexts.set(principal, context);
++                await Promise.resolve();
++                context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'denied', status: 'completed' } });
++                context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'shared', status: 'working', principal } });
++                return {
++                    notifications: { taskIds: ['shared'], resourcesListChanged: true },
++                    dispose: () => {
++                        disposed.push(principal);
++                    }
++                };
++            }
++        });
++        const handler = httpHandler([extension]);
++        const request = (id: number, principal: string) => {
++            const req = listenRequest(id, { taskIds: ['shared', 'denied'], resourcesListChanged: true });
++            req.headers.set('x-test-principal', principal);
++            return req;
++        };
++        const a = sseReader(await handler.fetch(request(1, 'a')));
++        const b = sseReader(await handler.fetch(request(1, 'b')));
++        for (const [stream, principal] of [
++            [a, 'a'],
++            [b, 'b']
++        ] as const) {
++            expect(await stream.next()).toMatchObject({
++                method: 'notifications/subscriptions/acknowledged',
++                params: { notifications: { taskIds: ['shared'] } }
++            });
++            expect(await stream.next()).toMatchObject({ method: TASK_STATUS, params: { principal, taskId: 'shared' } });
++        }
++        // A broadcast cannot inject into request-scoped subscriptions.
++        handler.notify.extension(TASK_STATUS, { taskId: 'shared', principal: 'broadcast' });
++        contexts.get('a')!.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'shared', principal: 'a-only' } });
++        await handler.close();
++        expect(await a.next()).toMatchObject({ params: { principal: 'a-only' } });
++        expect(await a.next()).toMatchObject({ result: { resultType: 'complete' } });
++        expect(await b.next()).toMatchObject({ result: { resultType: 'complete' } });
++        expect(disposed.sort()).toEqual(['a', 'b']);
++        expect([...contexts.values()].every(context => context.signal.aborted)).toBe(true);
++    });
++
++    it('counts pending setup against capacity and disposes a source that opens after cancellation', async () => {
++        const opened = deferred<OpenedListenExtension>();
++        const entered = deferred<ListenExtensionContext>();
++        let disposed = 0;
++        const handler = createMcpHandler(() => new McpServer({ name: 'pending', version: '1' }), {
++            keepAliveMs: 0,
++            maxSubscriptions: 1,
++            listenExtensions: [
++                tasksExtension({
++                    honor: undefined,
++                    open: (_filter, _caps, context) => {
++                        entered.resolve(context);
++                        return opened.promise;
++                    }
++                })
++            ]
++        });
++        const abort = new AbortController();
++        const pending = handler.fetch(new Request(listenRequest(1, { taskIds: ['t1'] }), { signal: abort.signal }));
++        const context = await entered.promise;
++        expect(await (await handler.fetch(listenRequest(2, { taskIds: ['t1'] }))).json()).toMatchObject({
++            error: { message: 'Subscription limit reached' }
++        });
++        abort.abort();
++        expect(await (await pending).json()).toMatchObject({ error: { code: -32_603 } });
++        expect(context.signal.aborted).toBe(true);
++        opened.resolve({
++            notifications: { taskIds: ['t1'] },
++            dispose: () => {
++                disposed++;
++            }
++        });
++        await new Promise<void>(resolve => setImmediate(resolve));
++        expect(disposed).toBe(1);
++        await handler.close();
++        expect(disposed).toBe(1);
++    });
++
++    it('server close cancels pending setup and bounds notifications before acknowledgement', async () => {
++        const entered = deferred<ListenExtensionContext>();
++        const opened = deferred<OpenedListenExtension>();
++        const handler = httpHandler([
++            tasksExtension({
++                honor: undefined,
++                open: (_filter, _caps, context) => {
++                    entered.resolve(context);
++                    return opened.promise;
++                }
++            })
++        ]);
++        const pending = handler.fetch(listenRequest(1, { taskIds: ['t1'] }));
++        const context = await entered.promise;
++        await handler.close();
++        expect(context.signal.aborted).toBe(true);
++        expect(await (await pending).json()).toMatchObject({ error: { code: -32_603 } });
++        opened.resolve({ notifications: { taskIds: ['t1'] } });
++
++        let disposed = 0;
++        const errors: Error[] = [];
++        const overflow = httpHandler(
++            [
++                tasksExtension({
++                    honor: undefined,
++                    open: (_filter, _caps, context) => {
++                        for (let i = 0; i < 129; i++) context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 't1' } });
++                        return {
++                            notifications: { taskIds: ['t1'] },
++                            dispose: () => {
++                                disposed++;
++                            }
++                        };
++                    }
++                })
++            ],
++            errors
++        );
++        expect(await (await overflow.fetch(listenRequest(1, { taskIds: ['t1'] }))).json()).toMatchObject({ error: { code: -32_603 } });
++        expect(disposed).toBe(1);
++        expect(errors.some(error => error.message.includes('buffer exceeded'))).toBe(true);
++        await overflow.close();
++    });
++});
++
++describe('createMcpHandler — listenExtensions', () => {
++    it('acks the extension fields and delivers extension events only for the honored task ids', async () => {
++        const handler = httpHandler([tasksExtension()]);
++        const stream = sseReader(await handler.fetch(listenRequest(1, { toolsListChanged: true, taskIds: ['t1'] })));
++        expect(await stream.next()).toEqual({
++            jsonrpc: '2.0',
++            method: 'notifications/subscriptions/acknowledged',
++            params: { _meta: { [SUBSCRIPTION_ID_META_KEY]: 1 }, notifications: { toolsListChanged: true, taskIds: ['t1'] } }
++        });
++
++        handler.notify.extension(TASK_STATUS, { taskId: 't2', status: 'working' });
++        handler.notify.extension('notifications/unclaimed', { taskId: 't1' });
++        handler.notify.extension(TASK_STATUS, { taskId: 't1', status: 'completed' });
++        handler.notify.toolsChanged();
++
++        expect(await stream.next()).toEqual({
++            jsonrpc: '2.0',
++            method: TASK_STATUS,
++            params: { taskId: 't1', status: 'completed', _meta: { [SUBSCRIPTION_ID_META_KEY]: 1 } }
++        });
++        expect((await stream.next()) as { method: string }).toMatchObject({ method: 'notifications/tools/list_changed' });
++        await stream.cancel();
++        await handler.close();
++    });
++
++    it('keeps a stream open on extension fields alone', async () => {
++        const handler = httpHandler([tasksExtension()]);
++        const stream = sseReader(await handler.fetch(listenRequest('only-tasks', { taskIds: ['t1'] })));
++        expect(await stream.next()).toMatchObject({ params: { notifications: { taskIds: ['t1'] } } });
++        handler.notify.extension(TASK_STATUS, { taskId: 't1' });
++        expect(await stream.next()).toMatchObject({ method: TASK_STATUS, params: { taskId: 't1' } });
++        await stream.cancel();
++        await handler.close();
++    });
++
++    it('does not let an extension honor a core field the capabilities deny', async () => {
++        const errors: Error[] = [];
++        const greedy = tasksExtension({
++            name: 'greedy',
++            honor: requested => ({ resourcesListChanged: true, taskIds: requested.taskIds })
++        });
++        const handler = httpHandler([greedy], errors);
++        const stream = sseReader(await handler.fetch(listenRequest(2, { resourcesListChanged: true, taskIds: ['t1'] })));
++        expect(await stream.next()).toMatchObject({ params: { notifications: { taskIds: ['t1'] } } });
++        expect(errors.map(e => e.message)).toEqual([
++            "subscriptions/listen: extension 'greedy' cannot honor 'resourcesListChanged'; the field is dropped"
++        ]);
++        await stream.cancel();
++        await handler.close();
++    });
++
++    it('a throwing honor() drops its fields from the ack and the record, serves core, and reports', async () => {
++        const errors: Error[] = [];
++        const broken = tasksExtension({
++            name: 'broken',
++            honor: () => {
++                throw new Error('boom');
++            }
++        });
++        const handler = httpHandler([broken], errors);
++        const stream = sseReader(await handler.fetch(listenRequest(3, { toolsListChanged: true, taskIds: ['t1'] })));
++        expect(await stream.next()).toMatchObject({ params: { notifications: { toolsListChanged: true } } });
++        expect(errors.map(e => e.message)).toEqual([
++            "subscriptions/listen: extension 'broken' honor() threw; its fields are not honored: boom"
++        ]);
++
++        // Its events are not delivered on this subscription; core events are.
++        handler.notify.extension(TASK_STATUS, { taskId: 't1' });
++        handler.notify.toolsChanged();
++        expect(await stream.next()).toMatchObject({ method: 'notifications/tools/list_changed' });
++        await stream.cancel();
++        await handler.close();
++    });
++
++    it('rejects a malformed extension field with -32602 before the ack', async () => {
++        const handler = httpHandler([tasksExtension()]);
++        const response = await handler.fetch(listenRequest(4, { toolsListChanged: true, taskIds: 'not-an-array' }));
++        expect(await response.json()).toEqual({
++            jsonrpc: '2.0',
++            id: 4,
++            error: { code: -32_602, message: "Invalid params: 'taskIds' must be an array of strings" }
++        });
++        await handler.close();
++    });
++
++    it('refuses an extension that declares a core notification or a method another extension declares', () => {
++        expect(() => httpHandler([tasksExtension({ methods: ['notifications/tools/list_changed'] })])).toThrow(
++            "listenExtensions: extension 'tasks' cannot declare the core notification notifications/tools/list_changed"
++        );
++        expect(() => httpHandler([tasksExtension(), tasksExtension({ name: 'copy' })])).toThrow(
++            `listenExtensions: ${TASK_STATUS} is declared by both 'tasks' and 'copy'`
++        );
++    });
++
++    it('without listenExtensions, unknown filter fields are still dropped from the ack', async () => {
++        const handler = httpHandler([]);
++        const stream = sseReader(await handler.fetch(listenRequest(5, { toolsListChanged: true, taskIds: ['t1'] })));
++        expect(await stream.next()).toMatchObject({ params: { notifications: { toolsListChanged: true } } });
++        await stream.cancel();
++        await handler.close();
++    });
++});
++
++describe('serveStdio — listenExtensions', () => {
++    async function bootModern(listenExtensions: ListenExtension[]) {
++        const [peerTx, wireTx] = InMemoryTransport.createLinkedPair();
++        const inbound: JSONRPCMessage[] = [];
++        peerTx.onmessage = m => inbound.push(m);
++        await peerTx.start();
++
++        let server!: McpServer;
++        const handle = serveStdio(
++            () => {
++                server = new McpServer({ name: 's', version: '1' });
++                server.registerTool('a', { inputSchema: z.object({}) }, async () => ({ content: [] }));
++                return server;
++            },
++            { transport: wireTx as Transport, listenExtensions }
++        );
++        await peerTx.send({ jsonrpc: '2.0', id: 'pin', method: 'tools/list', params: { _meta: ENVELOPE } });
++        await new Promise(r => setTimeout(r, 10));
++        inbound.length = 0;
++        const flush = () => new Promise(r => setTimeout(r, 10));
++        const send = (m: JSONRPCRequest | JSONRPCNotification) => peerTx.send(m);
++        return { handle, server: () => server, inbound, send, flush };
++    }
++
++    it('preserves protocol setup errors and required capability data over stdio', async () => {
++        const requiredCapabilities = { extensions: { 'io.modelcontextprotocol/tasks': {} } };
++        const { handle, inbound, send, flush } = await bootModern([
++            tasksExtension({
++                honor: undefined,
++                open: async () => {
++                    throw new ProtocolError(ProtocolErrorCode.MissingRequiredClientCapability, 'Tasks required', { requiredCapabilities });
++                }
++            })
++        ]);
++        await send(listenBody(1, { taskIds: ['one'] }));
++        await flush();
++        expect(inbound).toEqual([
++            {
++                jsonrpc: '2.0',
++                id: 1,
++                error: {
++                    code: ProtocolErrorCode.MissingRequiredClientCapability,
++                    message: 'Tasks required',
++                    data: { requiredCapabilities }
++                }
++            }
++        ]);
++        await handle.close();
++    });
++
++    it('buffers a request-scoped source until the ack and cancels exactly that subscription', async () => {
++        const contexts: ListenExtensionContext[] = [];
++        let disposed = 0;
++        const extension = tasksExtension({
++            honor: undefined,
++            open: async (_filter, _caps, context) => {
++                contexts.push(context);
++                await Promise.resolve();
++                context.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'same', status: 'working' } });
++                return {
++                    notifications: { taskIds: ['same'] },
++                    dispose: () => {
++                        disposed++;
++                    }
++                };
++            }
++        });
++        const { handle, server, inbound, send, flush } = await bootModern([extension]);
++        await send(listenBody(1, { taskIds: ['same'] }));
++        await flush();
++        expect(inbound.map(message => (message as JSONRPCNotification).method)).toEqual([
++            'notifications/subscriptions/acknowledged',
++            TASK_STATUS
++        ]);
++        inbound.length = 0;
++        await send(listenBody(2, { taskIds: ['same'] }));
++        await flush();
++        inbound.length = 0;
++        await send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
++        await flush();
++        expect(contexts[0]!.signal.aborted).toBe(true);
++        contexts[0]!.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'same', status: 'cancelled' } });
++        await server().server.notification({ method: TASK_STATUS, params: { taskId: 'same', status: 'broadcast' } });
++        contexts[1]!.publish({ kind: 'extension', method: TASK_STATUS, params: { taskId: 'same', status: 'completed' } });
++        await flush();
++        expect(inbound).toHaveLength(1);
++        expect(inbound[0]).toMatchObject({
++            method: TASK_STATUS,
++            params: { status: 'completed', _meta: { [SUBSCRIPTION_ID_META_KEY]: 2 } }
++        });
++        await handle.close();
++        expect(contexts[1]!.signal.aborted).toBe(true);
++        expect(disposed).toBe(2);
++    });
++
++    it('cancels stdio setup before its source opens and disposes the late result', async () => {
++        const entered = deferred<ListenExtensionContext>();
++        const opened = deferred<OpenedListenExtension>();
++        let disposed = 0;
++        const { handle, inbound, send, flush } = await bootModern([
++            tasksExtension({
++                honor: undefined,
++                open: (_filter, _caps, context) => {
++                    entered.resolve(context);
++                    return opened.promise;
++                }
++            })
++        ]);
++        await send(listenBody(1, { taskIds: ['t1'] }));
++        const context = await entered.promise;
++        await send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
++        await flush();
++        expect(context.signal.aborted).toBe(true);
++        expect(inbound.every(message => !('method' in message))).toBe(true);
++        opened.resolve({
++            notifications: { taskIds: ['t1'] },
++            dispose: () => {
++                disposed++;
++            }
++        });
++        await flush();
++        expect(disposed).toBe(1);
++        await handle.close();
++    });
++
++    it("acks the extension fields and routes the instance's extension notifications per subscription", async () => {
++        const { handle, server, inbound, send, flush } = await bootModern([tasksExtension()]);
++        await send(listenBody(1, { taskIds: ['t1'] }));
++        await send(listenBody(2, { taskIds: ['t2'] }));
++        await flush();
++        expect(inbound).toEqual([
++            {
++                jsonrpc: '2.0',
++                method: 'notifications/subscriptions/acknowledged',
++                params: { _meta: { [SUBSCRIPTION_ID_META_KEY]: 1 }, notifications: { taskIds: ['t1'] } }
++            },
++            {
++                jsonrpc: '2.0',
++                method: 'notifications/subscriptions/acknowledged',
++                params: { _meta: { [SUBSCRIPTION_ID_META_KEY]: 2 }, notifications: { taskIds: ['t2'] } }
++            }
++        ]);
++        inbound.length = 0;
++
++        await server().server.notification({ method: TASK_STATUS, params: { taskId: 't2', status: 'working' } });
++        await server().server.notification({ method: TASK_STATUS, params: { taskId: 't3', status: 'working' } });
++        await flush();
++        expect(inbound).toEqual([
++            {
++                jsonrpc: '2.0',
++                method: TASK_STATUS,
++                params: { taskId: 't2', status: 'working', _meta: { [SUBSCRIPTION_ID_META_KEY]: 2 } }
++            }
++        ]);
++        await handle.close();
++    });
++
++    it('a throwing honor() acks core only and its notifications are not delivered', async () => {
++        const broken = tasksExtension({
++            honor: () => {
++                throw new Error('boom');
++            }
++        });
++        const { handle, server, inbound, send, flush } = await bootModern([broken]);
++        await send(listenBody(1, { toolsListChanged: true, taskIds: ['t1'] }));
++        await flush();
++        expect(inbound).toHaveLength(1);
++        expect((inbound[0] as JSONRPCNotification).params?.notifications).toEqual({ toolsListChanged: true });
++        inbound.length = 0;
++        await server().server.notification({ method: TASK_STATUS, params: { taskId: 't1' } });
++        server().sendToolListChanged();
++        await flush();
++        expect(inbound.map(m => (m as JSONRPCNotification).method)).toEqual(['notifications/tools/list_changed']);
++        await handle.close();
++    });
++
++    it('rejects a malformed extension field with -32602', async () => {
++        const { handle, inbound, send, flush } = await bootModern([tasksExtension()]);
++        await send(listenBody(9, { taskIds: [1, 2] }));
++        await flush();
++        expect(inbound).toEqual([
++            { jsonrpc: '2.0', id: 9, error: { code: -32_602, message: "Invalid params: 'taskIds' must be an array of strings" } }
++        ]);
++        await handle.close();
++    });
++});
+diff --git a/packages/server/tsdown.config.ts b/packages/server/tsdown.config.ts
+index 992660ab..9d794e5b 100644
+--- a/packages/server/tsdown.config.ts
++++ b/packages/server/tsdown.config.ts
+@@ -17,6 +17,7 @@ export default defineConfig({
+     ],
+     format: ['esm', 'cjs'],
+     fixedExtension: true,
++    hash: false,
+     outDir: 'dist',
+     clean: true,
+     sourcemap: true,

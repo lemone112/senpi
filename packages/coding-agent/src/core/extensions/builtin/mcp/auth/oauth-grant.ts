@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { OAuthTokens } from "../../../../../vendor/mcp/client/index.mjs";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { isEphemeralIdentity, keyedIdentity } from "../config-identity-key.ts";

@@ -2890,6 +2890,16 @@ export class ExtensionRunner {
 						{},
 						Object.getOwnPropertyDescriptors(this.createContext(ext.path)),
 					) as ExtensionContext;
+					if (options.signal !== undefined) {
+						Object.defineProperty(ctx, "signal", {
+							configurable: true,
+							enumerable: true,
+							get: () => {
+								this.assertActive();
+								return options.signal;
+							},
+						});
+					}
 					// Defined, not assigned: on a runner without a session the copied member is a loop-side getter.
 					Object.defineProperty(ctx, "getSystemPrompt", {
 						configurable: true,

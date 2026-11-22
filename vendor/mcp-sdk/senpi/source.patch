@@ -1,0 +1,557 @@
+diff --git a/packages/client/src/client/client.ts b/packages/client/src/client/client.ts
+index 3b8298a..f94d30f 100644
+--- a/packages/client/src/client/client.ts
++++ b/packages/client/src/client/client.ts
+@@ -93,13 +93,15 @@ import type { CacheMode, CacheScope, ResponseCacheStore } from './responseCache'
+ import { ClientResponseCache, InMemoryResponseCacheStore, MAX_CACHE_TTL_MS } from './responseCache';
+ import type { ResolvedVersionNegotiation, VersionNegotiationOptions } from './versionNegotiation';
+ import {
++    assertNegotiationActive,
+     detectProbeEnvironment,
+     detectProbeTransportKind,
+     disarmSpentCloseGuard,
+     negotiateEra,
+     negotiateStdioViaSibling,
+     readStdioServerParams,
+-    resolveVersionNegotiation
++    resolveVersionNegotiation,
++    runNegotiationStep
+ } from './versionNegotiation';
+ 
+ /**
+@@ -206,6 +208,15 @@ export type ClientOptions = ProtocolOptions & {
+      */
+     capabilities?: ClientCapabilities;
+ 
++    /**
++     * Capabilities advertised by modern discovery and subsequent modern
++     * envelopes. When omitted, follows `capabilities` and registerCapabilities.
++     * An explicit projection (including {}) leaves legacy initialization and
++     * local handler validation unchanged. Per-request metadata can still
++     * override this default at the issuing interaction boundary.
++     */
++    modernCapabilities?: ClientCapabilities;
++
+     /**
+      * Console-compatible sink for local SDK diagnostics. This does not affect MCP protocol
+      * logging (`notifications/message`). Omitted methods discard diagnostics at that level.
+@@ -609,6 +620,7 @@ export class Client extends Protocol<ClientContext> {
+     private _serverCapabilities?: ServerCapabilities;
+     private _serverVersion?: Implementation;
+     private _capabilities: ClientCapabilities;
++    private readonly _modernCapabilities?: ClientCapabilities;
+     private _instructions?: string;
+     private _jsonSchemaValidator: jsonSchemaValidator;
+     private readonly _logger: SdkLogger;
+@@ -735,6 +747,7 @@ export class Client extends Protocol<ClientContext> {
+         this._logger = guardLogger(options?.logger);
+         if (options?.openTelemetry !== false) setProtocolInstrumentation(this, defaultInstrumentation());
+         this._capabilities = options?.capabilities ? { ...options.capabilities } : {};
++        this._modernCapabilities = options?.modernCapabilities === undefined ? undefined : { ...options.modernCapabilities };
+         this._jsonSchemaValidator = options?.jsonSchemaValidator ?? new DefaultJsonSchemaValidator();
+         this._enforceStrictCapabilities = options?.enforceStrictCapabilities ?? false;
+         this._versionNegotiation = options?.versionNegotiation;
+@@ -808,10 +821,14 @@ export class Client extends Protocol<ClientContext> {
+         return this._wireCodec().outboundEnvelope({
+             protocolVersion: version,
+             clientInfo: this._clientInfo,
+-            clientCapabilities: this._capabilities
++            clientCapabilities: this._modernCapabilitiesForWire()
+         });
+     }
+ 
++    private _modernCapabilitiesForWire(): ClientCapabilities {
++        return this._modernCapabilities ?? this._capabilities;
++    }
++
+     /**
+      * Wires the multi-round-trip auto-fulfilment engine (protocol revision
+      * 2026-07-28) into the response funnel: an `input_required` answer is
+@@ -1135,7 +1152,7 @@ export class Client extends Protocol<ClientContext> {
+      * in-place modes it rides the probed connection). Callers clear the negotiated protocol version before
+      * the handshake; its completion sets the negotiated (legacy) version.
+      */
+-    private async _legacyHandshake(transport: Transport, options?: RequestOptions): Promise<void> {
++    private async _legacyHandshake(transport: Transport, options?: RequestOptions, closeOnError = true): Promise<void> {
+         // initialize is a legacy-era handshake: only the legacy subset of the
+         // supported versions is ever offered or accepted here — a 2026-era
+         // revision is negotiated exclusively via server/discover.
+@@ -1197,7 +1214,7 @@ export class Client extends Protocol<ClientContext> {
+             }
+         } catch (error) {
+             // Disconnect if initialization fails.
+-            void this.close();
++            if (closeOnError) void this.close();
+             throw error;
+         }
+     }
+@@ -1228,14 +1245,17 @@ export class Client extends Protocol<ClientContext> {
+         // negotiation — every fresh negotiated connect re-runs the probe.
+         this._resetConnectionState();
+ 
++        const connectDeadline = Date.now() + (options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC);
+         let result: Awaited<ReturnType<typeof negotiateEra>>;
+         try {
+             const transportKind = detectProbeTransportKind(transport);
+             const baseDeps = {
+                 clientInfo: this._clientInfo,
+-                capabilities: this._capabilities,
++                capabilities: this._modernCapabilitiesForWire(),
+                 environment: detectProbeEnvironment(),
+-                defaultTimeoutMs: options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC
++                defaultTimeoutMs: options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC,
++                signal: options?.signal,
++                deadline: connectDeadline
+             };
+             // The SDK's stdio transport probes on a disposable sibling process,
+             // so the caller's transport spends its one child life on the
+@@ -1246,6 +1266,8 @@ export class Client extends Protocol<ClientContext> {
+                 stdioParams === undefined
+                     ? await negotiateEra(negotiation, { ...baseDeps, transport, transportKind })
+                     : await negotiateStdioViaSibling(negotiation, transport, stdioParams, baseDeps);
++            // Sibling disposal can await host cleanup after its probe settled.
++            assertNegotiationActive(options?.signal, connectDeadline);
+         } catch (error) {
+             // Typed connect error — close the channel like a failed initialize does.
+             await transport.close().catch(() => {});
+@@ -1265,15 +1287,60 @@ export class Client extends Protocol<ClientContext> {
+         // skip into the live session and swallow its first genuine close.
+         disarmSpentCloseGuard(transport);
+ 
+-        await super.connect(transport);
++        try {
++            await runNegotiationStep(() => super.connect(transport), options?.signal, connectDeadline);
++        } catch (error) {
++            await this.close().catch(() => {});
++            await transport.close().catch(() => {});
++            disarmSpentCloseGuard(transport);
++            throw error;
++        }
+ 
+         if (result.era === 'legacy') {
+             // Conservative fallback: the in-place probing modes run the plain
+             // legacy handshake on the probed connection; the sibling path runs
+             // it as the session child's first exchange (the probe never touched
+             // the transport version slot either way).
+-            await this._legacyHandshake(transport, options);
+-            return;
++            const provisional = result.stdioProbeTimedOut === true && negotiation.kind === 'auto';
++            try {
++                await runNegotiationStep(() => this._legacyHandshake(transport, {
++                    ...options, timeout: Math.max(1, connectDeadline - Date.now())
++                }, false), options?.signal, connectDeadline);
++                return;
++            } catch (error) {
++                if (!provisional) {
++                    await this.close().catch(() => {});
++                    throw error;
++                }
++                try {
++                    // A cold modern process may outlive the disposable probe.
++                    // Only an explicit initialize rejection can reopen that
++                    // provisional verdict; successful legacy handshakes stick.
++                    if (!(error instanceof ProtocolError) ||
++                        (error.code !== ProtocolErrorCode.MethodNotFound && error.code !== HEADER_MISMATCH_ERROR_CODE)) throw error;
++                    const recovered = await negotiateEra(
++                        { ...negotiation, fallbackAvailable: false, probe: { ...negotiation.probe, maxRetries: 0 } },
++                        {
++                            transport,
++                            transportKind: 'stdio',
++                            clientInfo: this._clientInfo,
++                            capabilities: this._modernCapabilitiesForWire(),
++                            environment: detectProbeEnvironment(),
++                            defaultTimeoutMs: options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC,
++                            started: true,
++                            deadline: connectDeadline,
++                            signal: options?.signal
++                        }
++                    );
++                    assertNegotiationActive(options?.signal, connectDeadline);
++                    if (recovered.era !== 'modern') throw error;
++                    result = recovered;
++                } catch (recoveryError) {
++                    await this.close().catch(() => {});
++                    disarmSpentCloseGuard(transport);
++                    throw recoveryError;
++                }
++            }
+         }
+ 
+         this._serverCapabilities = result.discover.capabilities;
+@@ -1353,9 +1420,10 @@ export class Client extends Protocol<ClientContext> {
+                 options?.signal?.addEventListener('abort', onConnectAbort);
+                 try {
+                     this._autoOpenedSubscription = await this.listen(filter, {
+-                        timeout: options?.timeout,
++                        timeout: Math.max(1, connectDeadline - Date.now()),
+                         signal: ackAbort.signal
+                     });
++                    assertNegotiationActive(options?.signal, connectDeadline);
+                 } catch (error) {
+                     // Connect-signal abort during the ack wait propagates as a
+                     // connect() rejection (caller asked to abort connect). The
+@@ -1363,7 +1431,7 @@ export class Client extends Protocol<ClientContext> {
+                     // rethrowing — a connect() rejection MUST NOT leave a
+                     // half-open connection. A server-side refusal stays a
+                     // soft onerror (connect succeeds, no listen stream).
+-                    if (options?.signal?.aborted) {
++                    if (options?.signal?.aborted || Date.now() >= connectDeadline) {
+                         await this.close().catch(() => {});
+                         throw error;
+                     }
+diff --git a/packages/client/src/client/stdio.ts b/packages/client/src/client/stdio.ts
+index 6dbddb6..ecf1843 100644
+--- a/packages/client/src/client/stdio.ts
++++ b/packages/client/src/client/stdio.ts
+@@ -25,6 +25,31 @@ export type StdioServerParameters = {
+      */
+     env?: Record<string, string>;
+ 
++    /**
++     * Whether to merge the default inherited environment into `env`.
++     * Set to false to pass only the supplied environment, or {} when absent,
++     * to spawn. Node may still supply platform-required variables on Windows.
++     * Defaults to true.
++     */
++    inheritEnvironment?: boolean;
++
++    /**
++     * Resolve and authorize a fresh process descriptor immediately before every
++     * spawn, including the disposable version-negotiation sibling. A rejection
++     * prevents that spawn. Returned parameters replace, rather than merge with,
++     * the constructor's descriptor; this resolver is retained for future starts.
++     */
++    resolveParameters?: () => Promise<StdioServerParameters>;
++
++    /**
++     * Host process-tree cleanup, awaited before closing stdin or signaling a
++     * still-running child. Runs once per process for close and disposable probe
++     * teardown. Retained from the constructor independently of resolveParameters.
++     * The host may terminate the process itself; rejection leaves the ordinary
++     * transport teardown in place. Does not supervise spontaneous process exit.
++     */
++    beforeClose?: (pid: number) => Promise<void>;
++
+     /**
+      * How to handle stderr of the child process. This matches the semantics of Node's `child_process.spawn`.
+      *
+@@ -109,6 +134,8 @@ export class StdioClientTransport implements Transport {
+     private _readBuffer: ReadBuffer;
+     private _serverParams: StdioServerParameters;
+     private _stderrStream: PassThrough | null = null;
++    private _starting = false;
++    private _startGeneration = 0;
+ 
+     onclose?: () => void;
+     onerror?: (error: Error) => void;
+@@ -126,23 +153,38 @@ export class StdioClientTransport implements Transport {
+      * Starts the server process and prepares to communicate with it.
+      */
+     async start(): Promise<void> {
+-        if (this._process) {
++        if (this._process || this._starting) {
+             throw new Error(
+                 'StdioClientTransport already started! If using Client class, note that connect() calls start() automatically.'
+             );
+         }
+ 
++        this._starting = true;
++        const generation = this._startGeneration;
++        let server: StdioServerParameters;
++        try {
++            server = this._serverParams.resolveParameters ? await this._serverParams.resolveParameters() : this._serverParams;
++            if (generation !== this._startGeneration) {
++                throw new SdkError(SdkErrorCode.NotConnected, 'Transport closed while resolving process parameters');
++            }
++        } finally {
++            this._starting = false;
++        }
++        this._readBuffer = new ReadBuffer({ maxBufferSize: server.maxBufferSize });
++        if (!this._stderrStream && (server.stderr === 'pipe' || server.stderr === 'overlapped')) {
++            this._stderrStream = new PassThrough();
++        }
++
+         return new Promise((resolve, reject) => {
+-            this._process = spawn(this._serverParams.command, this._serverParams.args ?? [], {
+-                // merge default env with server env because mcp server needs some env vars
++            this._process = spawn(server.command, server.args ?? [], {
+                 env: {
+-                    ...getDefaultEnvironment(),
+-                    ...this._serverParams.env
++                    ...(server.inheritEnvironment === false ? {} : getDefaultEnvironment()),
++                    ...server.env
+                 },
+-                stdio: ['pipe', 'pipe', this._serverParams.stderr ?? 'inherit'],
++                stdio: ['pipe', 'pipe', server.stderr ?? 'inherit'],
+                 shell: false,
+                 windowsHide: process.platform === 'win32',
+-                cwd: this._serverParams.cwd
++                cwd: server.cwd
+             });
+ 
+             this._process.on('error', error => {
+@@ -222,6 +264,16 @@ export class StdioClientTransport implements Transport {
+         }
+     }
+ 
++    private async _beforeClose(proc: ChildProcess): Promise<void> {
++        if (proc.pid !== undefined && this._serverParams.beforeClose) {
++            try {
++                await this._serverParams.beforeClose(proc.pid);
++            } catch {
++                // Host cleanup is best-effort; always finish ordinary teardown.
++            }
++        }
++    }
++
+     /**
+      * Reap a disposable probe sibling (see the version-negotiation sibling
+      * flow): signal-first teardown awaiting process `exit` — never the `close`
+@@ -231,27 +283,31 @@ export class StdioClientTransport implements Transport {
+      * @internal
+      */
+     private async _dispose(): Promise<void> {
++        this._startGeneration++;
+         const proc = this._process;
+         this._process = undefined;
+         if (proc && proc.exitCode === null && proc.signalCode === null) {
+             const exited = new Promise<void>(resolve => proc.once('exit', () => resolve()));
+-            try {
+-                proc.stdin?.end();
+-            } catch {
+-                // ignore
+-            }
+-            try {
+-                proc.kill('SIGTERM');
+-            } catch {
+-                // ignore
+-            }
+-            await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 1000).unref())]);
++            await this._beforeClose(proc);
+             if (proc.exitCode === null && proc.signalCode === null) {
+                 try {
+-                    proc.kill('SIGKILL');
++                    proc.stdin?.end();
+                 } catch {
+                     // ignore
+                 }
++                try {
++                    proc.kill('SIGTERM');
++                } catch {
++                    // ignore
++                }
++                await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 1000).unref())]);
++                if (proc.exitCode === null && proc.signalCode === null) {
++                    try {
++                        proc.kill('SIGKILL');
++                    } catch {
++                        // ignore
++                    }
++                }
+             }
+             await exited;
+         }
+@@ -278,6 +334,7 @@ export class StdioClientTransport implements Transport {
+     }
+ 
+     async close(): Promise<void> {
++        this._startGeneration++;
+         if (this._process) {
+             const processToClose = this._process;
+             this._process = undefined;
+@@ -288,6 +345,10 @@ export class StdioClientTransport implements Transport {
+                 });
+             });
+ 
++            if (processToClose.exitCode === null && processToClose.signalCode === null) {
++                await this._beforeClose(processToClose);
++            }
++
+             try {
+                 processToClose.stdin?.end();
+             } catch {
+@@ -296,7 +357,7 @@ export class StdioClientTransport implements Transport {
+ 
+             await Promise.race([closePromise, new Promise(resolve => setTimeout(resolve, 2000).unref())]);
+ 
+-            if (processToClose.exitCode === null) {
++            if (processToClose.exitCode === null && processToClose.signalCode === null) {
+                 try {
+                     processToClose.kill('SIGTERM');
+                 } catch {
+@@ -306,7 +367,7 @@ export class StdioClientTransport implements Transport {
+                 await Promise.race([closePromise, new Promise(resolve => setTimeout(resolve, 2000).unref())]);
+             }
+ 
+-            if (processToClose.exitCode === null) {
++            if (processToClose.exitCode === null && processToClose.signalCode === null) {
+                 try {
+                     processToClose.kill('SIGKILL');
+                 } catch {
+diff --git a/packages/client/src/client/versionNegotiation.ts b/packages/client/src/client/versionNegotiation.ts
+index 5dfced8..050c344 100644
+--- a/packages/client/src/client/versionNegotiation.ts
++++ b/packages/client/src/client/versionNegotiation.ts
+@@ -193,6 +193,37 @@ type RawProbeReply =
+  * counterpart; a pre-set `onmessage` is restored at detach and chained by
+  * `Protocol.connect()` like the others.)
+  */
++export function assertNegotiationActive(signal?: AbortSignal, deadline?: number): void {
++    signal?.throwIfAborted();
++    if (deadline !== undefined && Date.now() >= deadline) {
++        throw new SdkError(SdkErrorCode.RequestTimeout, 'Version negotiation exceeded the connect deadline');
++    }
++}
++
++/** Bound transport startup as well as wire waits; callers close a stopped transport. */
++export async function runNegotiationStep<T>(operation: () => Promise<T>, signal?: AbortSignal, deadline?: number): Promise<T> {
++    assertNegotiationActive(signal, deadline);
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    let onAbort: (() => void) | undefined;
++    try {
++        const result = await new Promise<T>((resolve, reject) => {
++            onAbort = () => reject(signal?.reason);
++            signal?.addEventListener('abort', onAbort, { once: true });
++            if (deadline !== undefined) {
++                timer = setTimeout(() => reject(new SdkError(SdkErrorCode.RequestTimeout,
++                    'Version negotiation exceeded the connect deadline')), Math.max(0, deadline - Date.now()));
++            }
++            if (signal?.aborted) onAbort();
++            else operation().then(resolve, reject);
++        });
++        assertNegotiationActive(signal, deadline);
++        return result;
++    } finally {
++        clearTimeout(timer);
++        if (onAbort) signal?.removeEventListener('abort', onAbort);
++    }
++}
++
+ class ProbeWindow {
+     private _pending: { id: string; resolve: (reply: RawProbeReply) => void } | undefined;
+     private _probeCounter = 0;
+@@ -207,7 +238,7 @@ class ProbeWindow {
+         this._savedOnClose = _transport.onclose;
+     }
+ 
+-    static async open(transport: Transport): Promise<ProbeWindow> {
++    static async open(transport: Transport, started = false, signal?: AbortSignal, deadline?: number): Promise<ProbeWindow> {
+         const window = new ProbeWindow(transport);
+         transport.onmessage = message => {
+             const pending = window._pending;
+@@ -244,7 +275,7 @@ class ProbeWindow {
+             window._savedOnClose?.();
+         };
+         try {
+-            await transport.start();
++            if (!started) await runNegotiationStep(() => transport.start(), signal, deadline);
+         } catch (error) {
+             window.detach();
+             throw error;
+@@ -256,7 +287,7 @@ class ProbeWindow {
+      * Send one probe request and await its reply. Probe ids are strings, so they
+      * never collide with Protocol's numeric ids (e.g. on a shared stdio pipe).
+      */
+-    async exchange(buildRequest: (id: string) => JSONRPCRequest, timeoutMs: number): Promise<RawProbeReply> {
++    async exchange(buildRequest: (id: string) => JSONRPCRequest, timeoutMs: number, signal?: AbortSignal): Promise<RawProbeReply> {
+         const id = `server-discover-probe-${++this._probeCounter}`;
+         return new Promise<RawProbeReply>(resolve => {
+             let settled = false;
+@@ -264,12 +295,19 @@ class ProbeWindow {
+                 if (settled) return;
+                 settled = true;
+                 clearTimeout(timer);
++                signal?.removeEventListener('abort', onAbort);
+                 if (this._pending?.id === id) {
+                     this._pending = undefined;
+                 }
+                 resolve(reply);
+             };
++            const onAbort = () => settle({ kind: 'send-error', error: signal?.reason });
+             const timer = setTimeout(() => settle({ kind: 'timeout' }), timeoutMs);
++            if (signal?.aborted) {
++                onAbort();
++                return;
++            }
++            signal?.addEventListener('abort', onAbort, { once: true });
+             this._pending = { id, resolve: settle };
+             this._transport.send(buildRequest(id)).catch((error: unknown) => settle({ kind: 'send-error', error }));
+         });
+@@ -451,9 +489,14 @@ export interface NegotiationDeps {
+      * fallback stream and stays a typed error.
+      */
+     disposableProbe?: boolean;
++    /** Internal recovery on the already Protocol-connected, initialized-rejected stdio child. */
++    started?: boolean;
++    /** Recovery shares the original connect deadline and cancellation. */
++    deadline?: number;
++    signal?: AbortSignal;
+ }
+ 
+-export type NegotiationResult = { era: 'modern'; version: string; discover: DiscoverResult } | { era: 'legacy' };
++export type NegotiationResult = { era: 'modern'; version: string; discover: DiscoverResult } | { era: 'legacy'; stdioProbeTimedOut?: true };
+ 
+ /**
+  * Run the negotiation probe state machine on a raw (not yet Protocol-connected)
+@@ -471,7 +514,8 @@ export async function negotiateEra(
+     const clientModernVersions = negotiation.kind === 'pin' ? [negotiation.version] : negotiation.modernVersions;
+     const fallbackAvailable = negotiation.kind === 'auto' && negotiation.fallbackAvailable;
+ 
+-    const window = await ProbeWindow.open(deps.transport);
++    assertNegotiationActive(deps.signal, deps.deadline);
++    const window = await ProbeWindow.open(deps.transport, deps.started, deps.signal, deps.deadline);
+ 
+     const probe = async (): Promise<NegotiationResult> => {
+         let requestedVersion = clientModernVersions[0]!;
+@@ -483,10 +527,15 @@ export async function negotiateEra(
+         // never counted against) the corrective continuation.
+         let timeoutRetriesRemaining = maxRetries;
+         for (;;) {
++            assertNegotiationActive(deps.signal, deps.deadline);
++            const remainingMs = deps.deadline === undefined ? timeoutMs : Math.min(timeoutMs, deps.deadline - Date.now());
++            if (remainingMs <= 0) throw new SdkError(SdkErrorCode.RequestTimeout, 'Version negotiation exceeded the connect deadline');
+             const reply = await window.exchange(
+                 id => buildProbeRequest(id, requestedVersion, deps.clientInfo, deps.capabilities),
+-                timeoutMs
++                remainingMs,
++                deps.signal
+             );
++            assertNegotiationActive(deps.signal, deps.deadline);
+ 
+             if (reply.kind === 'timeout' && timeoutRetriesRemaining > 0) {
+                 timeoutRetriesRemaining--;
+@@ -553,7 +602,7 @@ export async function negotiateEra(
+                                 "(this transport probed in place — the disposable sibling probe requires the SDK's base StdioClientTransport)"
+                         );
+                     }
+-                    return { era: 'legacy' };
++                    return { era: 'legacy', ...(outcome.kind === 'timeout' && deps.disposableProbe ? { stdioProbeTimedOut: true as const } : {}) };
+                 }
+                 case 'error': {
+                     throw verdict.error;
+@@ -571,7 +620,8 @@ export async function negotiateEra(
+         window.detach();
+         throw error;
+     }
+-    window.release();
++    if (deps.started) window.detach();
++    else window.release();
+     return result;
+ }
+ 
+@@ -617,7 +667,14 @@ export async function negotiateStdioViaSibling(
+     deps: Omit<NegotiationDeps, 'transport' | 'transportKind' | 'disposableProbe'>
+ ): Promise<NegotiationResult> {
+     const SiblingTransport = sessionTransport.constructor as new (params: Record<string, unknown>) => Transport;
+-    const sibling = new SiblingTransport({ ...params, stderr: 'ignore' });
++    const resolveParameters = params.resolveParameters;
++    const sibling = new SiblingTransport({
++        ...params,
++        stderr: 'ignore',
++        ...(typeof resolveParameters === 'function'
++            ? { resolveParameters: async () => ({ ...(await resolveParameters()), stderr: 'ignore' }) }
++            : {})
++    });
+ 
+     // The session transport is unstarted while the sibling probes, and closing
+     // an unstarted transport records nothing — so watch its close() for the

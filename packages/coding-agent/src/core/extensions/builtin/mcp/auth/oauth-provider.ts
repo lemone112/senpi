@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { oauthBrandName } from "@earendil-works/pi-ai/utils/oauth-page";
-import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
+import type { OAuthClientProvider, OAuthDiscoveryState } from "../../../../../vendor/mcp/client/index.mjs";
 import type {
 	OAuthClientInformationFull,
 	OAuthClientInformationMixed,
 	OAuthClientMetadata,
 	OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+} from "../../../../../vendor/mcp/client/index.mjs";
 import type { McpLogger } from "../log.ts";
 import { fingerprintSecret } from "../log.ts";
 import { OAuthFlowError } from "./oauth-errors.ts";

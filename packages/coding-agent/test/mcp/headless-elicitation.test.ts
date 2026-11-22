@@ -1,4 +1,4 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "../../src/vendor/mcp/client/index.mjs";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -59,9 +59,9 @@ describe("headless MCP elicitation (senpi#4185)", () => {
 		try {
 			await server.connect(serverTransport);
 			await client.connect(clientTransport);
-			await expect(
-				client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin)),
-			).resolves.toMatchObject({ content: [] });
+			await expect(client.callTool({ name: "fixture" }, mcpRequestOptions(origin))).resolves.toMatchObject({
+				content: [],
+			});
 			expect(handled).toHaveBeenCalledTimes(1);
 		} finally {
 			await Promise.all([client.close(), server.close()]);
@@ -97,8 +97,7 @@ describe("headless MCP elicitation (senpi#4185)", () => {
 		try {
 			await server.connect(serverTransport);
 			await client.connect(clientTransport);
-			for (let i = 0; i < 2; i++)
-				calls.push(client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin)));
+			for (let i = 0; i < 2; i++) calls.push(client.callTool({ name: "fixture" }, mcpRequestOptions(origin)));
 			await entered.promise;
 			await expect(server.elicitInput(booleanForm.params)).rejects.toMatchObject({
 				code: ErrorCode.InternalError,
@@ -221,16 +220,19 @@ describe("headless MCP elicitation (senpi#4185)", () => {
 				{ cwd: root.cwd, isProjectTrusted: () => true, hasUI, ui } as never,
 			);
 		}
-		let handle: ((request: ElicitRequest) => Promise<unknown>) | undefined;
-		const client = {
-			setRequestHandler: (_schema: unknown, handler: typeof handle) => {
-				handle = handler;
-			},
-		} as unknown as Client;
+		const client = new Client({ name: "client", version: "1" }, { capabilities: { elicitation: {} } });
+		const server = new Server({ name: "server", version: "1" }, { capabilities: {} });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 		await configureMcpElicitation(client, service);
-		if (handle === undefined) throw new Error("elicitation handler was not installed");
-		if (hasUI) expect(await handle(booleanForm)).toEqual({ action: "accept", content: { confirmed: false } });
-		else await expect(handle(booleanForm)).rejects.toMatchObject({ code: ErrorCode.InternalError, data: undefined });
+		await server.connect(serverTransport);
+		try {
+			await client.connect(clientTransport);
+			const response = server.elicitInput(booleanForm.params);
+			if (hasUI) expect(await response).toEqual({ action: "accept", content: { confirmed: false } });
+			else await expect(response).rejects.toMatchObject({ code: ErrorCode.InternalError, data: undefined });
+		} finally {
+			await Promise.all([client.close(), server.close()]);
+		}
 		expect(ui.confirm).not.toHaveBeenCalled();
 		expect(ui.input).not.toHaveBeenCalled();
 		expect(ui.select).toHaveBeenCalledTimes(hasUI ? 1 : 0);

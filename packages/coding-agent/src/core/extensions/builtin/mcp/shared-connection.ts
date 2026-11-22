@@ -1,4 +1,4 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
 import { collectServerCatalogForCache, type McpCachedServerCatalog, writeMcpCachedServer } from "./catalog-cache.ts";
 import { McpConfigGenerationChangedError } from "./config-generation.ts";
 import type { McpServerConfig } from "./config-schema.ts";

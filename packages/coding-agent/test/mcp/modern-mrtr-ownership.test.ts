@@ -50,9 +50,9 @@ describe("MRTR concurrent ownership", () => {
 			});
 		const ownerA = origin(a, uiA.presentation);
 		const ownerB = origin(b, uiB.presentation);
-		const pendingA = a.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(ownerA));
+		const pendingA = a.client.callTool({ name: "fixture" }, mcpRequestOptions(ownerA));
 		await firstReceived.promise;
-		const pendingB = b.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(ownerB));
+		const pendingB = b.client.callTool({ name: "fixture" }, mcpRequestOptions(ownerB));
 		await Promise.all([pendingA, pendingB]);
 		expect(script.requests).toHaveLength(4);
 		expect(script.requests[0]?.id).not.toBe(script.requests[1]?.id);

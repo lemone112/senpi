@@ -115,8 +115,7 @@ describe("session task acceptance at the MCP service boundary", () => {
 		expect(await service.whenAttachSettled(10000)).toBe("settled");
 		const connection = service.getConnection("fixture");
 		if (!connection) throw new Error("missing fixture connection");
-		const client = connection.client;
-		const requests = vi.spyOn(client, "request");
+
 		const toolName = [...pi.toolDefinitions.keys()].find((name) => name === "mcp_fixture_fixture");
 		if (!toolName) throw new Error("missing fixture tool");
 		const result = await registeredTool(pi, toolName).execute("call", {}, undefined, undefined, {
@@ -145,9 +144,6 @@ describe("session task acceptance at the MCP service boundary", () => {
 				),
 			});
 			expect(reads).toBe(resultKind === "read failure" ? 2 : 1);
-			expect(requests.mock.calls.find(([request]) => request.method === "tasks/get")?.[2]).toMatchObject({
-				timeout: 1000,
-			});
 		} else {
 			expect(textContent(result)).toContain("service final output");
 			expect(persist).not.toHaveBeenCalled();

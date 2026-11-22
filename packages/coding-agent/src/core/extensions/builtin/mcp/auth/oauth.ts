@@ -3,8 +3,8 @@ import type {
 	OAuthDiscoveryState,
 	OAuthServerInfo,
 	auth as sdkAuth,
-} from "@modelcontextprotocol/sdk/client/auth.js";
-import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+} from "../../../../../vendor/mcp/client/index.mjs";
+import type { FetchLike } from "../../../../../vendor/mcp/client/index.mjs";
 import { loadMcpSdkAuth } from "../sdk.lazy.ts";
 import { isInvalidGrant, OAuthFlowError } from "./oauth-errors.ts";
 import { oauthFetch } from "./oauth-fetch.ts";
@@ -79,6 +79,7 @@ export async function finishAuthorization(
 			auth(provider, {
 				serverUrl: provider.serverUrl,
 				authorizationCode: code,
+				iss,
 				fetchFn: oauthFetch(options.fetchFn),
 			}),
 		);

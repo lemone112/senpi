@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { vi } from "vitest";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../src/vendor/mcp/client/index.mjs";
 import { normalizeServer } from "../../../src/core/extensions/builtin/mcp/config.ts";
 import { createMcpLogger } from "../../../src/core/extensions/builtin/mcp/log.ts";
 import { ServerConnection } from "../../../src/core/extensions/builtin/mcp/connection.ts";
@@ -92,7 +92,7 @@ export async function connect(results: unknown[], sse: boolean | "stdio" = false
 		get(target, property) {
 			if (property === "callTool")
 				return (...args: Parameters<Client["callTool"]>) =>
-					target.callTool(args[0], args[1], mcpRequestOptions(origin, args[2]));
+					target.callTool(args[0], mcpRequestOptions(origin, args[1]));
 			if (property === "readResource")
 				return (...args: Parameters<Client["readResource"]>) =>
 					target.readResource(args[0], mcpRequestOptions(origin, args[1]));

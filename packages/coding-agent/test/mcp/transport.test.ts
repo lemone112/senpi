@@ -17,6 +17,7 @@ import {
 } from "../../src/core/extensions/builtin/mcp/transport.ts";
 import { assertProcessDead, spawnHttpFixture, stdioFixtureCommand } from "./fixtures/spawn-fixture.ts";
 import { mrtrTui } from "./fixtures/mrtr-presentation.ts";
+import { NativeTasksFixture, startNativeTasks } from "./fixtures/native-tasks.ts";
 
 const execFileAsync = promisify(execFile);
 const connections: McpTransportConnection[] = [];
@@ -32,6 +33,83 @@ afterEach(async () => {
 });
 
 describe("MCP transport factory", () => {
+	it("expires unresolved materialization without dispatching discovery after the resolver returns", async () => {
+		const fixture = new NativeTasksFixture();
+		const server = await startNativeTasks(fixture);
+		cleanupTasks.push(server.close);
+		const release = Promise.withResolvers<void>();
+		const config = serverConfig({ type: "http", url: server.url, connectTimeoutMs: 100 });
+		const connection = createMcpTransport({
+			config,
+			logger: createMcpLogger("expired-config"),
+			serverName: "expired-config",
+			resolveConfig: async () => {
+				await release.promise;
+				return config;
+			},
+		});
+		connections.push(connection);
+		const started = performance.now();
+		const connecting = connectMcpTransport(connection);
+		const unblock = setTimeout(release.resolve, 250);
+		try {
+			await expect(connecting).rejects.toMatchObject({ name: "TimeoutError" });
+		} finally {
+			clearTimeout(unblock);
+			release.resolve();
+		}
+		expect(performance.now() - started).toBeLessThan(220);
+		await expect(connection.materialize()).rejects.toBeDefined();
+		expect(fixture.requests).toHaveLength(0);
+	});
+	it("bounds initial discovery after materialization by the remaining connection budget", async () => {
+		const fixture = new NativeTasksFixture();
+		const release = Promise.withResolvers<void>();
+		fixture.beforeReply = async (request) => {
+			if (request.method === "server/discover") await release.promise;
+		};
+		const server = await startNativeTasks(fixture);
+		cleanupTasks.push(server.close);
+		const config = serverConfig({ type: "http", url: server.url, connectTimeoutMs: 180 });
+		const connection = createMcpTransport({
+			config,
+			logger: createMcpLogger("expired-discovery"),
+			serverName: "expired-discovery",
+			resolveConfig: async () => {
+				await new Promise((resolve) => setTimeout(resolve, 80));
+				return config;
+			},
+		});
+		connections.push(connection);
+		const started = performance.now();
+		try {
+			await expect(connectMcpTransport(connection)).rejects.toMatchObject({ name: "TimeoutError" });
+		} finally {
+			release.resolve();
+		}
+		expect(performance.now() - started).toBeLessThan(800);
+		expect(fixture.requests.filter((request) => request.method === "server/discover")).toHaveLength(1);
+		expect(fixture.requests.some((request) => request.method === "subscriptions/listen")).toBe(false);
+	});
+	it("allows HTTP discovery to use the configured connection budget", async () => {
+		const fixture = new NativeTasksFixture();
+		fixture.beforeReply = async (request) => {
+			if (request.method === "server/discover") await new Promise((resolve) => setTimeout(resolve, 450));
+		};
+		const server = await startNativeTasks(fixture);
+		cleanupTasks.push(server.close);
+		const connection = createMcpTransport({
+			config: serverConfig({ type: "http", url: server.url, connectTimeoutMs: 1200 }),
+			logger: createMcpLogger("delayed-http-fixture"),
+			serverName: "delayed-http-fixture",
+		});
+		connections.push(connection);
+		await connection.materialize();
+		await connectMcpTransport(connection);
+		expect(connection.client.getProtocolEra()).toBe("modern");
+		expect(fixture.requests.filter((request) => request.method === "server/discover")).toHaveLength(1);
+		expect(fixture.requests.some((request) => request.method === "initialize")).toBe(false);
+	});
 	it.each([false, true])(
 		"retains redacted stderr diagnostics with private presenter enforcement (failure %s)",
 		async (failure) => {
@@ -234,6 +312,21 @@ async function waitForChildPids(rootPid: number): Promise<number[]> {
 }
 
 async function childPids(parentPid: number): Promise<number[]> {
+	if (process.platform === "win32") {
+		const { stdout } = await execFileAsync(
+			"powershell.exe",
+			[
+				"-NoProfile",
+				"-Command",
+				`Get-CimInstance Win32_Process -Filter 'ParentProcessId = ${parentPid}' | Select-Object -ExpandProperty ProcessId`,
+			],
+			{ timeout: 5000, windowsHide: true },
+		);
+		return stdout
+			.split(/\s+/)
+			.map(Number)
+			.filter((pid) => Number.isInteger(pid) && pid > 0);
+	}
 	if (!["darwin", "linux"].includes(process.platform)) return [];
 	try {
 		const { stdout } = await execFileAsync("pgrep", ["-P", String(parentPid), "."], { timeout: 1000 });

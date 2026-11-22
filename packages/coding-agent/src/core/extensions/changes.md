@@ -1,3 +1,19 @@
+## 2026-11-22 - Expose prompt preparation cancellation through context
+
+### What changed
+
+- `runner.ts` exposes an explicit `emitBeforeAgentStart` signal through each handler's `ctx.signal`, retaining lazy guarded context getters. `types.ts` documents preparation as well as agent-run cancellation.
+- Existing handlers retain their context and return contract. MCP startup can wait within its configured budget while public abort promptly ends preparation.
+
+### Why an extension could not handle it
+
+Only the runner can provide the caller's preparation signal before the agent run has a signal of its own.
+
+### Expected merge conflict zones
+
+- MEDIUM: `runner.ts` before-agent-start dispatch.
+- LOW: `ExtensionContext.signal` documentation in `types.ts`.
+
 ## 2026-11-19 - tool_result handlers still run for a tool an abort cut (senpi#7073)
 
 ### What changed

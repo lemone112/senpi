@@ -1,7 +1,7 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { AnySchema, SchemaOutput } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { Request } from "@modelcontextprotocol/sdk/types.js";
+import type { Client } from "../../../../../vendor/mcp/client/index.mjs";
+import type { StandardSchemaV1 } from "../../../../../vendor/mcp/client/index.mjs";
+import type { RequestOptions } from "../../../../../vendor/mcp/client/index.mjs";
+import type { Request } from "../../../../../vendor/mcp/client/index.mjs";
 import {
 	beginLegacyMcpOperation,
 	type McpRequestOrigin,
@@ -9,7 +9,7 @@ import {
 	takeMcpRequestOrigin,
 } from "../request-origin.ts";
 import { AuthError } from "../errors.ts";
-import { loadMcpSdkProtocol, loadMcpSdkTypes, loadMcpSdkZodCompat } from "../sdk.lazy.ts";
+import { loadMcpSdkProtocol, loadMcpSdkTypes, parseMcpResult } from "../sdk.lazy.ts";
 import { type McpClock, mcpElapsedClock, mcpInterrupted as interrupted, onMcpClientClose } from "../wrap.ts";
 import { collectMrtrForm, type MrtrInputResponse } from "./elicitation.ts";
 import { isRecord, validateMrtrForm } from "./form-schema.ts";
@@ -17,6 +17,7 @@ import { McpMrtrError } from "./errors.ts";
 import { queuedForm } from "./consent-queue.ts";
 import { parseInputs } from "./inputs.ts";
 import { ParameterHeaderValidationError } from "./parameter-headers.ts";
+import { mcpSubscriptions, type McpTaskSubscription } from "./sdk-subscriptions.ts";
 import { followMcpTask, MCP_TASK_EXTENSION, mcpTaskTimeoutMs, parseMcpTask } from "./tasks.ts";
 
 export const MAX_MCP_MRTR_ROUNDS = 8;
@@ -54,11 +55,23 @@ export function installModernRequestAdapter(
 ): void {
 	const sdkRequest = client.request.bind(client);
 	states.set(client, protocol);
-	const requestWithMrtr: Client["request"] = async <T extends AnySchema>(
+	const requestWithMrtr = async (
 		request: Request,
-		schema: T,
-		options?: RequestOptions,
-	): Promise<SchemaOutput<T>> => {
+		schemaOrOptions?: StandardSchemaV1 | RequestOptions,
+		maybeOptions?: RequestOptions,
+	): Promise<unknown> => {
+		const explicit = schemaOrOptions && "~standard" in schemaOrOptions ? schemaOrOptions : undefined;
+		const options = explicit ? maybeOptions : (schemaOrOptions as RequestOptions | undefined);
+		if (!explicit && !capableMethods.has(request.method))
+			return Reflect.apply(sdkRequest, client, [request, options]);
+		const types = await loadMcpSdkTypes();
+		const schema =
+			explicit ??
+			(request.method === "resources/read"
+				? types.ReadResourceResultSchema
+				: request.method === "prompts/get"
+					? types.GetPromptResultSchema
+					: types.CallToolResultSchema);
 		if (request.method === "initialize") return sdkRequest(request, schema, options);
 		const { origin, sdkOptions } = takeMcpRequestOrigin(options, client);
 		if (protocol.version === undefined) {
@@ -72,7 +85,7 @@ export function installModernRequestAdapter(
 				end?.();
 			}
 		}
-		if (own(request.params ?? {}, "requestState") || own(request.params ?? {}, "inputResponses") || options?.task)
+		if (own(request.params ?? {}, "requestState") || own(request.params ?? {}, "inputResponses"))
 			throw new McpMrtrError("MCP_MRTR_INVALID_INPUT");
 		const params = structuredClone(request.params ?? {});
 		const { DEFAULT_REQUEST_TIMEOUT_MSEC } = await loadMcpSdkProtocol();
@@ -129,6 +142,7 @@ export function installModernRequestAdapter(
 					authorityCaptured = true;
 				} else if (authority !== snapshot) stop("MCP_MRTR_CONTEXT_CHANGED");
 			}
+			if (readCredential() !== credential) stop("MCP_MRTR_CONTEXT_CHANGED");
 			check();
 		};
 		const off = controller?.onStateChange(() => {
@@ -143,13 +157,13 @@ export function installModernRequestAdapter(
 		origin?.presentation?.signal.addEventListener("abort", onPresentationLost, { once: true });
 		const timer = clock.schedule(() => stop("MCP_MRTR_TIMEOUT"), Math.max(0, duration));
 		let offTaskClose: (() => void) | undefined;
+		let taskSubscription: McpTaskSubscription | undefined;
+		let taskSubscriptionHonored = false;
 		if (sdkOptions.signal?.aborted) onCallerAbort();
 		if (origin?.signal.aborted) onOwnerAbort();
 		try {
-			const { safeParse } = await interrupted(loadMcpSdkZodCompat(), operation.signal);
-			// Use the SDK's own Zod identity, including when npm installs another copy for this package.
 			const { ResultSchema } = await interrupted(loadMcpSdkTypes(), operation.signal);
-			const completeResult = (result: Record<string, unknown>, taskId?: string): SchemaOutput<T> => {
+			const completeResult = async (result: Record<string, unknown>, taskId?: string): Promise<unknown> => {
 				const invalid = () =>
 					new McpMrtrError(
 						taskId === undefined ? "MCP_MRTR_INVALID_RESULT" : "MCP_TASK_INVALID_RESULT",
@@ -161,7 +175,7 @@ export function installModernRequestAdapter(
 					["requestState", "inputRequests", "inputResponses"].some((key) => own(result, key))
 				)
 					throw invalid();
-				const parsed = safeParse(schema, result);
+				const parsed = await parseMcpResult(schema, result);
 				if (!parsed.success) throw invalid();
 				return parsed.data;
 			};
@@ -244,6 +258,15 @@ export function installModernRequestAdapter(
 				if (byteSize(responses) > 512 * 1024) throw new McpMrtrError("MCP_MRTR_INPUT_LIMIT");
 				return responses;
 			};
+			if (observingTask && origin?.observingTaskId) {
+				await resolveAuthority();
+				taskSubscription = mcpSubscriptions(client).watchTask(
+					origin.observingTaskId,
+					operation.signal,
+					resolveAuthority,
+				);
+				taskSubscriptionHonored = await interrupted(taskSubscription.ready, operation.signal);
+			}
 			for (let round = 0; ; round++) {
 				await resolveAuthority();
 				const remaining = deadline - clock.now();
@@ -268,6 +291,7 @@ export function installModernRequestAdapter(
 						() =>
 							sdkRequest({ method: request.method, params: outgoing }, ResultSchema, {
 								...sdkOptions,
+								allowInputRequired: true,
 								signal: attempt.signal,
 								timeout: Math.min(timeout, remaining),
 								maxTotalTimeout: remaining,
@@ -298,7 +322,7 @@ export function installModernRequestAdapter(
 					const task = parseMcpTask(result, observingTask ? origin?.observingTaskId : undefined);
 					// The tool boundary persists the handle before exposing an acceptance receipt.
 					if (!observingTask && origin?.acceptTask) {
-						const accepted = safeParse(schema, result);
+						const accepted = await parseMcpResult(schema, result);
 						if (!accepted.success) throw new McpMrtrError("MCP_MRTR_INVALID_RESULT");
 						return accepted.data;
 					}
@@ -306,11 +330,26 @@ export function installModernRequestAdapter(
 					clock.cancel(timer);
 					deadline = Infinity;
 					offTaskClose = onMcpClientClose(client, () => stop("MCP_MRTR_CONTEXT_CHANGED"));
+					if (!observingTask && !operation.signal.aborted) {
+						taskSubscription = mcpSubscriptions(client).watchTask(
+							task.taskId,
+							operation.signal,
+							resolveAuthority,
+						);
+						try {
+							taskSubscriptionHonored = await interrupted(taskSubscription.ready, operation.signal);
+						} catch (error) {
+							// The accepted handle still needs cooperative cancellation if abort won during ACK.
+							if (!operation.signal.aborted) throw error;
+						}
+					}
 					result = await followMcpTask(result, {
 						clock,
 						signal: operation.signal,
 						timeoutMs: taskTimeout,
 						cancelOnAbort: !observingTask,
+						subscription: taskSubscriptionHonored ? taskSubscription : undefined,
+						beforeConsume: resolveAuthority,
 						inputs: collectInputs,
 						progress: (task) => {
 							check();
@@ -384,6 +423,7 @@ export function installModernRequestAdapter(
 			clock.cancel(timer);
 			off?.();
 			offTaskClose?.();
+			taskSubscription?.close();
 			sdkOptions.signal?.removeEventListener("abort", onCallerAbort);
 			origin?.signal.removeEventListener("abort", onOwnerAbort);
 			origin?.presentation?.signal.removeEventListener("abort", onPresentationLost);
@@ -391,7 +431,7 @@ export function installModernRequestAdapter(
 	};
 	// Preserve the SDK method itself until negotiation positively selects modern.
 	protocol.activateRequests = () => {
-		client.request = requestWithMrtr;
+		client.request = requestWithMrtr as Client["request"];
 	};
 	// Default legacy clients retain the SDK method and its original admission behavior.
 	// Enforced legacy calls need private operation ownership before the first tools/call.

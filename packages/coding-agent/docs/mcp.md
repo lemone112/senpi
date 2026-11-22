@@ -132,25 +132,39 @@ Changed nonempty task status messages also enter native follow-up admission. A
 server can request browser participation in an authorized status message while
 its task continues working; this does not create a form or require a second Done
 action. Status recovery stores only the message digest and episode number. A
-repeated poll does not repeat the notice, while the same message after a cleared
+repeated status snapshot does not repeat the notice, while the same message after a cleared
 or changed state begins a new episode. Private text stays in the authorized chat.
 
 Print/JSON and hosts without a persistent session keep the tool pending until
 completion. Their caller cancellation or this cap requests `tasks/cancel`;
 cancellation is cooperative. For background observation, the cap renews the read
-attempt without cancelling work. Each poll uses its own request timeout and the
-server's `pollIntervalMs`; without that hint polling backs off from 1 to 30 seconds.
+attempt without cancelling work. Native task subscriptions register before a single
+bootstrap read, then receive pushed snapshots without recurring polling. If the
+server explicitly leaves the task ID out of its subscription acknowledgment,
+observation falls back to reads with their own request timeout and the server's
+`pollIntervalMs`; without that hint polling backs off from 1 to 30 seconds. A
+broken or rejected stream remains an observation failure and uses session recovery.
+Malformed notifications and a replacement acknowledgment that stops honoring an
+already observed task also end that observation. Recovery acquires a fresh
+acknowledgment before deciding whether snapshots are needed. The request's current
+authorization is checked before every initial or replacement task subscription and
+before each update exposes progress, input or a result to its session. A revoked
+observer is removed before its task ID can be sent in a new subscription.
 Ordinary non-task calls retain their existing whole-operation deadline.
 
 ### `connectTimeoutMs`
-Connect + initialize handshake timeout. Default `15000`.
+One budget for configuration resolution, transport setup, discovery and the
+initialize handshake. Expiry aborts connection setup; late configuration or
+negotiation results cannot activate a connection. Process cleanup may continue
+after that budget. Default `15000`.
 
 ### `startupTimeoutMs`
-Bounded startup window (ms) that a server's first connect + catalog fetch is
-raced against during session attach. A server that does not settle inside the
-window keeps connecting in the background and surfaces its tools when ready, so
-a slow or wedged server never blocks the first turn. Default `250`. Set higher
-to wait for tools before the first turn, `0` to never wait. The
+Bounded wait (ms) for an uncached server's catalog when preparing the first real
+turn. Session admission and prompt previews remain immediate. Servers are awaited
+in parallel; a server that exceeds its window keeps connecting in the background.
+The model sees which catalogs are still connecting and receives their tools on a
+later turn. Cached catalogs need no startup wait. Default `250`. Set higher
+to wait longer for tools before the first turn, `0` to never wait. The
 `SENPI_MCP_STARTUP_TIMEOUT_MS` environment variable overrides this for every
 server.
 

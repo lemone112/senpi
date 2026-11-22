@@ -1,5 +1,5 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
+import type { Tool } from "../../../../vendor/mcp/client/index.mjs";
 
 /** Raw JSON Schema, not the SDK v1 object-root subset. */
 export type McpJsonSchema = boolean | Record<string, unknown>;

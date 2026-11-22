@@ -1,3 +1,18 @@
+## 2026-11-22 - Cancel prompt preparation before an agent run exists
+
+### What changed
+
+- `agent-session.ts` links each real `before_agent_start` dispatch to caller cancellation and public session abort. A cancelled preparation cannot admit a provider request; its controller is released after the dispatch.
+- The same path serves ordinary prompts and custom-message turns. Preview composition retains its existing independent signal.
+
+### Why an extension could not handle it
+
+The session owns prompt admission and public abort. Before the run starts, `agent.signal` does not exist, so extensions cannot derive the cancellation lifetime themselves.
+
+### Expected merge conflict zones
+
+- MEDIUM: `agent-session.ts` before-agent-start dispatch and abort handling.
+
 ## 2026-11-20 - every announced queued-drain wait is closed (oh-my-openagent#14428)
 
 ### What changed

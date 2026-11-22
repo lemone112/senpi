@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ResultSchema } from "../../src/vendor/mcp/core/index.mjs";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import {
 	McpSessionTasks,

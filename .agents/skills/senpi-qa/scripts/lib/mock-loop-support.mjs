@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { evidenceDir, repoRoot, tsxEntry } from "./common.mjs";
+import { RpcClient } from "./rpc-client.mjs";
 
 export const API_PRESETS = {
 	"openai-completions": {
@@ -133,65 +133,40 @@ export function writeMcpFixtureExtension(box, { toolName, fixture }) {
 	const root = repoRoot();
 	const callLogPath = join(box.dir, "mcp-fixture-calls.jsonl");
 	const extensionPath = join(box.dir, "mcp-fixture-extension.mjs");
-	const typeboxUrl = pathToFileURL(join(root, "node_modules", "typebox", "build", "index.mjs")).href;
-	const clientUrl = pathToFileURL(
-		join(root, "node_modules", "@modelcontextprotocol", "sdk", "dist", "esm", "client", "index.js"),
-	).href;
-	const stdioUrl = pathToFileURL(
-		join(root, "node_modules", "@modelcontextprotocol", "sdk", "dist", "esm", "client", "stdio.js"),
-	).href;
+	writeFileSync(join(box.agentDir, "mcp.json"), JSON.stringify({ mcpServers: { fx: {
+		type: "stdio",
+		lifecycle: "eager",
+		command: process.execPath,
+		args: [tsxEntry(root), "--tsconfig", join(root, "tsconfig.json"),
+			join(root, "packages/coding-agent/test/mcp/fixtures/stdio-server.ts"), "--tools", String(fixture.toolCount)],
+		connectTimeoutMs: 5000,
+		startupTimeoutMs: 5000,
+	} } }));
 	const source = `
 import { appendFileSync } from "node:fs";
-import { Type } from ${JSON.stringify(typeboxUrl)};
-import { Client } from ${JSON.stringify(clientUrl)};
-import { StdioClientTransport } from ${JSON.stringify(stdioUrl)};
 
 const toolName = ${JSON.stringify(toolName)};
 const sourceToolName = ${JSON.stringify(fixture.sourceToolName)};
 const callLogPath = ${JSON.stringify(callLogPath)};
-const fixtureCommand = ${JSON.stringify(process.execPath)};
-const fixtureArgs = ${JSON.stringify([
-		tsxEntry(root),
-		"--tsconfig",
-		join(root, "tsconfig.json"),
-		join(root, "packages", "coding-agent", "test", "mcp", "fixtures", "stdio-server.ts"),
-		"--tools",
-		String(fixture.toolCount),
-	])};
 
 export default function(pi) {
-	pi.registerTool({
-		name: toolName,
-		label: "MCP fixture tool",
-		description: "senpi-qa local MCP stdio fixture proxy. Returns deterministic fixture text.",
-		parameters: Type.Object({
-			value: Type.Optional(Type.String()),
-			mode: Type.Optional(Type.String()),
-			nested: Type.Optional(Type.Any())
-		}, { additionalProperties: true }),
-		async execute(toolCallId, params) {
-			const transport = new StdioClientTransport({ command: fixtureCommand, args: fixtureArgs, stderr: "pipe" });
-			const client = new Client({ name: "senpi-qa-mcp-fixture-proxy", version: "0.0.0" });
-			try {
-				await client.connect(transport, { timeout: 3000 });
-				const listed = await client.listTools();
-				if (!listed.tools.some((tool) => tool.name === sourceToolName)) {
-					throw new Error("MCP fixture did not list " + sourceToolName);
-				}
-				const result = await client.callTool({ name: sourceToolName, arguments: params });
-				appendFileSync(callLogPath, JSON.stringify({ toolCallId, toolName, sourceToolName, params, listed: listed.tools.map((tool) => tool.name), result }) + "\\n");
-				return { content: result.content, details: { fixture: "mcp-stdio", sourceToolName, listed: listed.tools.map((tool) => tool.name) } };
-			} finally {
-				await client.close().catch((error) => {
-					appendFileSync(callLogPath, JSON.stringify({ cleanupError: error instanceof Error ? error.name : typeof error }) + "\\n");
-				});
-			}
-		}
+	pi.on("tool_result", (event) => {
+		if (event.toolName !== toolName) return;
+		appendFileSync(callLogPath, JSON.stringify({
+			toolCallId: event.toolCallId, toolName, sourceToolName, params: event.input,
+			result: { content: event.content, isError: event.isError },
+			path: "builtin MCP -> native SDK -> registered MCP tool",
+		}) + "\\n");
 	});
 }
 `;
 	writeFileSync(extensionPath, source);
 	return {
+		enableBuiltinExtensions: true,
+		mcpToolCount: fixture.toolCount,
+		diagnosticPaths: Object.fromEntries(["fx", "service", "startup"].map((name) => [
+			`mcp-${name}.log`, join(box.agentDir, "logs", "mcp", `${name}.log`),
+		])),
 		extraArgs: ["--extension", extensionPath],
 		callLogPath,
 		expectedResultText: fixture.resultPrefix,
@@ -199,16 +174,55 @@ export default function(pi) {
 	};
 }
 
+/** Drive the ordinary builtin with an immediate first prompt; the CLI owns bounded startup readiness. */
+export async function runMcpFixtureTurn({ box, args, prompt, timeoutMs, toolCount }) {
+	const client = new RpcClient({ env: hermeticEnv(box.env), cwd: box.cwd, extraArgs: args });
+	const closed = new Promise((resolve) => client.child.once("close", (code) => resolve(code)));
+	const deadline = Date.now() + timeoutMs;
+	const remaining = () => Math.max(1, deadline - Date.now());
+	let inventory;
+	let failure;
+	const watchdog = setTimeout(() => client.child.kill("SIGKILL"), timeoutMs);
+	try {
+		const completed = client.waitForEvent((event) => event.type === "agent_end", { timeoutMs: remaining() });
+		void completed.catch(() => {});
+		const response = await client.send({ type: "prompt", message: prompt }, { timeoutMs: remaining() });
+		if (!response.success) throw new Error("RPC rejected the fixture prompt");
+		await completed;
+		const loaded = await client.send({ type: "get_loaded_surfaces" }, { timeoutMs: remaining() });
+		if (!loaded.success) throw new Error("RPC could not read loaded surfaces");
+		inventory = loaded.data;
+		if (!inventory.mcpServers.some((server) => server.name === "fx" && server.status === "connected" && server.toolCount === toolCount)) {
+			throw new Error("First prompt finished without the fixture catalog");
+		}
+	} catch (error) {
+		failure = error instanceof Error ? error.message : String(error);
+	} finally {
+		client.close();
+	}
+	const exitCode = await closed;
+	clearTimeout(watchdog);
+	return {
+		code: failure ? 1 : exitCode,
+		stdout: client.events.map((event) => JSON.stringify(event)).join("\n"),
+		stderr: `${client.stderr}${failure ? `\n${failure}` : ""}`,
+		mcpStartup: inventory,
+	};
+}
+
 export function validateMcpFixtureToolResult({ prepared, server }) {
 	const calls = readFixtureCalls(prepared.callLogPath);
-	const fixtureCall = calls.find((call) => call.toolName && call.sourceToolName);
+	const fixtureCall = calls.find((call) => call.toolName && call.sourceToolName && !call.result?.isError &&
+		call.result?.content?.some((part) => part.type === "text" && part.text.includes(prepared.expectedResultText)));
 	const requestSawResult = server.requests
 		.slice(1)
 		.some((request) => JSON.stringify(request.messages ?? "").includes(prepared.expectedResultText));
+	const firstAdvertised = server.requests[0]?.tools?.some((tool) =>
+		(tool.function?.name ?? tool.name) === fixtureCall?.toolName) === true;
 	return {
-		name: "requested MCP fixture tool exists, executed, and fed result back to model",
-		pass: !!fixtureCall && requestSawResult,
-		detail: `callLog=${fixtureCall ? "yes" : "no"} modelSawFixtureResult=${requestSawResult}`,
+		name: "first model request advertised the MCP tool, executed it, and received its result",
+		pass: !!fixtureCall && firstAdvertised && requestSawResult,
+		detail: `firstAdvertised=${firstAdvertised} callLog=${fixtureCall ? "yes" : "no"} modelSawFixtureResult=${requestSawResult}`,
 	};
 }
 
@@ -240,6 +254,10 @@ export function safeErrorReason(error) {
 
 export function writeToolEvidence(slug, { apiName, result, server, prepared }) {
 	const dir = evidenceDir(slug);
+	if (result.mcpStartup) writeFileSync(join(dir, "mcp-startup-inventory.json"), JSON.stringify(result.mcpStartup, null, 2));
+	for (const [name, path] of Object.entries(prepared.diagnosticPaths ?? {})) {
+		if (existsSync(path)) writeFileSync(join(dir, name), readFileSync(path, "utf8"));
+	}
 	writeFileSync(join(dir, `mock-loop-${apiName}-stdout.txt`), result.stdout);
 	writeFileSync(join(dir, `mock-loop-${apiName}-stderr.txt`), result.stderr);
 	writeFileSync(join(dir, `mock-loop-${apiName}-requests.json`), JSON.stringify(sanitizeRequests(server.requests), null, 2));

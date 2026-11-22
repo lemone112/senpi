@@ -167,9 +167,7 @@ it.each([false, true])("renegotiates late grants and revocation on a legacy conn
 			isCurrent: () => connection.state === "connected",
 			resolveAuthority: async () => null,
 		});
-		await expect(
-			connection.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin)),
-		).resolves.toMatchObject({
+		await expect(connection.client.callTool({ name: "fixture" }, mcpRequestOptions(origin))).resolves.toMatchObject({
 			content: [{ type: "text", text: JSON.stringify({ action: "accept", content: {} }) }],
 		});
 		expect(shown).toHaveBeenCalledTimes(1);

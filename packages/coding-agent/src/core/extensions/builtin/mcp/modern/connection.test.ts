@@ -50,7 +50,7 @@ describe("discovery connection ownership", () => {
 					const request = JSON.parse(line);
 					fs.appendFileSync(process.argv[1], request.method + "\\n");
 					process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id,
-						error: { code: -32020, message: "modern only" } }) + "\\n");
+						error: { code: -32022, message: "Unsupported protocol version", data: { supported: ["2027-01-01"], requested: "2026-07-28" } } }) + "\\n");
 				}
 			}
 			main().catch(error => { console.error(error); process.exitCode = 1; });
@@ -61,7 +61,7 @@ describe("discovery connection ownership", () => {
 			args: ["-e", script, receipt],
 		});
 		try {
-			await expect(connection.connect()).rejects.toMatchObject({ phase: "modern-stdio" });
+			await expect(connection.connect()).rejects.toMatchObject({ phase: "protocol" });
 			expect(await readFile(receipt, "utf8")).toBe("spawn\nserver/discover\n");
 			expect(connection.state).toBe("degraded");
 		} finally {
@@ -107,7 +107,15 @@ describe("discovery connection ownership", () => {
 		const fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
 			const request = JSON.parse(String(init?.body));
 			return Response.json(
-				{ jsonrpc: "2.0", id: request.id, error: { code: -32021, message: "Missing required capability" } },
+				{
+					jsonrpc: "2.0",
+					id: request.id,
+					error: {
+						code: -32022,
+						message: "Unsupported protocol version",
+						data: { supported: ["2027-01-01"], requested: "2026-07-28" },
+					},
+				},
 				{ status: 400 },
 			);
 		});
@@ -119,12 +127,12 @@ describe("discovery connection ownership", () => {
 		});
 		try {
 			const pending = connection.connect();
-			const rejected = expect(pending).rejects.toThrow(/modern discovery failed/);
+			const rejected = expect(pending).rejects.toThrow(/no compatible protocol version/);
 			await rejected;
 			expect(observed).toEqual([pending]);
 			expect(fetch).toHaveBeenCalledOnce();
 			expect(connection.state).toBe("degraded");
-			expect(connection.lastError?.message).toContain("modern discovery failed");
+			expect(connection.lastError?.message).toContain("no compatible protocol version");
 		} finally {
 			await cleanup();
 		}

@@ -1,5 +1,5 @@
 import { readFileSync, watch } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 describe("ServerConnection state machine", () => {
-	it("coalesces concurrent connect calls into one fixture spawn and emits one transition per state", async () => {
+	it("coalesces concurrent connect calls into one probe and one session child and emits one transition per state", async () => {
 		const root = await tmpRoot("coalesce");
 		const counterFile = join(root, "spawns.txt");
 		const connection = createConnection("coalesce", root, ["--tools", "2", "--spawn-counter-file", counterFile]);
@@ -37,7 +37,7 @@ describe("ServerConnection state machine", () => {
 
 		expect(connection.state).toBe("connected");
 		expect(listed?.tools.map((tool) => tool.name)).toEqual(["tool_1", "tool_2"]);
-		expect(await readCounter(counterFile)).toBe(1);
+		expect(await readCounter(counterFile)).toBe(2);
 		expect(events.state.map((event) => `${event.previousState}->${event.state}`)).toEqual([
 			"idle->connecting",
 			"connecting->connected",
@@ -73,6 +73,7 @@ describe("ServerConnection state machine", () => {
 
 		expect(connection.state).toBe("idle");
 		expect(connection.lastError).toBeUndefined();
+		// Reload cancels the in-flight probe before a session child is admitted.
 		expect(await readCounter(counterFile)).toBe(1);
 		expect(events.state.map((event) => `${event.previousState}->${event.state}`)).toEqual([
 			"idle->connecting",
@@ -160,8 +161,7 @@ describe("ServerConnection state machine", () => {
 	it("fails fixture startup when the spawn counter cannot be read", async () => {
 		const root = await tmpRoot("counter-read-error");
 		const counterFile = join(root, "spawns.txt");
-		await writeFile(counterFile, "7\n", { mode: 0o200 });
-		await chmod(counterFile, 0o200);
+		await mkdir(counterFile);
 		const connection = createConnection("counter-read-error", root, [
 			"--tools",
 			"1",
@@ -171,11 +171,10 @@ describe("ServerConnection state machine", () => {
 		connections.push(connection);
 
 		await expect(connection.connect()).rejects.toThrow(/failed during connect|closed/i);
-		await chmod(counterFile, 0o600);
 
 		expect(connection.state).toBe("degraded");
 		expect(connection.lastError).toBeInstanceOf(Error);
-		expect(await readCounter(counterFile)).toBe(7);
+		expect((await stat(counterFile)).isDirectory()).toBe(true);
 	});
 
 	it("supports explicit degraded, suspended, auth, registration, tools-changed, and disable seams", async () => {

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "../../src/vendor/mcp/client/index.mjs";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { expect, it, vi } from "vitest";
@@ -141,9 +141,10 @@ it.each([false, true])("private MRTR processing failure sends no continuation (r
 			isCurrent: () => connection.state === "connected",
 			resolveAuthority: async () => null,
 		});
-		await expect(
-			connection.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin)),
-		).rejects.toMatchObject({ code: "MCP_MRTR_PROCESSING_UNAVAILABLE", retriable: false });
+		await expect(connection.client.callTool({ name: "fixture" }, mcpRequestOptions(origin))).rejects.toMatchObject({
+			code: "MCP_MRTR_PROCESSING_UNAVAILABLE",
+			retriable: false,
+		});
 		expect(script.requests).toHaveLength(1);
 		expect(script.requests[0]?.params).toHaveProperty(
 			["_meta", "io.modelcontextprotocol/clientCapabilities"],
@@ -274,7 +275,7 @@ it.each(["legacy", "modern", "modern-parallel"] as const)(
 			});
 			let result: Promise<unknown>;
 			if (era !== "legacy") {
-				result = connection.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin));
+				result = connection.client.callTool({ name: "fixture" }, mcpRequestOptions(origin));
 			} else {
 				await configureMcpElicitation(
 					legacy,
@@ -305,7 +306,7 @@ it.each(["legacy", "modern", "modern-parallel"] as const)(
 						expect(await reply.promise).toEqual({
 							jsonrpc: "2.0",
 							id: "unavailable",
-							error: { code: -32603, message: "MCP error -32603: Elicitation processing unavailable" },
+							error: { code: -32603, message: "Elicitation processing unavailable" },
 						});
 						expect(holderRecords.filter((record) => record.type === "mcp_form_request")).toHaveLength(0);
 						expect(admission).not.toHaveBeenCalled();
@@ -352,12 +353,10 @@ it.each(["legacy", "modern", "modern-parallel"] as const)(
 			if (era === "modern-parallel") {
 				script.results.push(inputResult("second"));
 				const received = script.next("inputResultSent");
-				concurrent = connection.client
-					.callTool({ name: "parallel-fixture" }, undefined, mcpRequestOptions(origin))
-					.then(
-						(result) => ({ result }),
-						(error) => ({ error }),
-					);
+				concurrent = connection.client.callTool({ name: "parallel-fixture" }, mcpRequestOptions(origin)).then(
+					(result) => ({ result }),
+					(error) => ({ error }),
+				);
 				await received;
 				await secondAttempt.promise;
 				expect(holderRecords.filter((record) => record.type === "mcp_form_request")).toHaveLength(1);

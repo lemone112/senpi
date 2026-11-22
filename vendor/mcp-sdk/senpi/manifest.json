@@ -1,0 +1,10 @@
+{
+  "patchSha256": "c1e0982efe0e6896e756adc40777ec34787b6478f801ac6e29b751f95ede7d50",
+  "artifacts": {
+    "client": {
+      "file": "client-4f766c23efcbe726.tgz",
+      "bytes": 1818077,
+      "integrity": "sha512-Roii56LJIixOpa0hzTE1z79LwWxC2BfEHscb3lA0/IE/ZAI3PjXvv2/oQHHM/dnHmmwhFyh0KgZ+FFQ6gpLixQ=="
+    }
+  }
+}

@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
-import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { OAuthDiscoveryState } from "../../../../../vendor/mcp/client/index.mjs";
+import type { OAuthClientInformationFull } from "../../../../../vendor/mcp/client/index.mjs";
 import { getAgentDir } from "../../../../../config.ts";
 import { type HeldFileLock, lockWithLossHandling } from "../../../../file-lock.ts";
 import { adoptLegacyRecord, type LegacyMigration, readRecordAsync } from "./legacy-migration.ts";

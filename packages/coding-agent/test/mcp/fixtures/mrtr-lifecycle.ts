@@ -1,6 +1,4 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { type JSONRPCMessage, LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { Client, type Transport, type JSONRPCMessage } from "../../../src/vendor/mcp/client/index.mjs";
 import { vi } from "vitest";
 import { ServerConnection } from "../../../src/core/extensions/builtin/mcp/connection.ts";
 import {
@@ -65,13 +63,14 @@ class ScriptTransport implements Transport {
 	}
 	async send(message: JSONRPCMessage) {
 		if (!("method" in message)) return;
-		if (message.method === "initialize" && "id" in message) {
+		if (message.method === "server/discover" && "id" in message) {
 			this.onmessage?.({
 				jsonrpc: "2.0",
 				id: message.id,
 				result: {
-					protocolVersion: LATEST_PROTOCOL_VERSION,
-					serverInfo: { name: "test", version: "1" },
+					resultType: "complete",
+					supportedVersions: ["2026-07-28"],
+					_meta: { "io.modelcontextprotocol/serverInfo": { name: "test", version: "1" } },
 					capabilities: {
 						tools: {},
 						...(this.tasks ? { extensions: { "io.modelcontextprotocol/tasks": {} } } : {}),
@@ -79,12 +78,21 @@ class ScriptTransport implements Transport {
 				},
 			});
 		}
+		if (message.method === "subscriptions/listen" && "id" in message) {
+			this.onmessage?.({
+				jsonrpc: "2.0",
+				method: "notifications/subscriptions/acknowledged",
+				params: { _meta: { "io.modelcontextprotocol/subscriptionId": message.id }, notifications: {} },
+			});
+			return;
+		}
 		if (message.method === "notifications/cancelled") this.cancellations.push(message);
 		if (message.method !== "tools/call" && !message.method.startsWith("tasks/")) return;
 		this.calls.push(message);
 		this.received.resolve();
 		const result = this.results[this.calls.length - 1];
-		if (result && "id" in message) this.onmessage?.({ jsonrpc: "2.0", id: message.id, result });
+		if (result && "id" in message)
+			this.onmessage?.({ jsonrpc: "2.0", id: message.id, result: { resultType: "complete", ...result } });
 	}
 	progress() {
 		const message = this.calls.at(-1);
@@ -109,9 +117,10 @@ export async function cleanupMrtrLifecycle() {
 export async function fixture(results: Array<Record<string, unknown> | undefined>, tasks = false) {
 	vi.useFakeTimers();
 	const transport = new ScriptTransport(results, tasks);
-	const client = new Client({ name: "fixture", version: "1" });
+	const client = new Client({ name: "fixture", version: "1" }, { versionNegotiation: { mode: "auto" } });
 	await client.connect(transport);
 	clients.push(client);
+	client.acceptResultType("tools/call", "task");
 	const underlying = vi.spyOn(client, "request");
 	const clock = new Clock();
 	await installModernRequestAdapter(client, { version: "2026-07-28" }, clock);

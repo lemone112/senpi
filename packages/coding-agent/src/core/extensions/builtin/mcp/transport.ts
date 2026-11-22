@@ -1,15 +1,15 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
+import type { Transport } from "../../../../vendor/mcp/client/index.mjs";
 import type { McpOAuthProvider } from "./auth/oauth-provider.ts";
 import type { McpServerConfig } from "./config-schema.ts";
 import type { McpElicitationUiProvider } from "./elicitation.ts";
 import { ConnectError, TimeoutError } from "./errors.ts";
 import type { McpLogger } from "./log.ts";
-import { delay, reapProcessTree } from "./process-tree.ts";
+import { delay } from "./process-tree.ts";
 import type { ProjectMcpMaterialization } from "./project-skill-policy.ts";
 import type { McpMaterializedTransport, McpTransportSpec } from "./transport-sdk.ts";
 import { errorMessage, mcpTransportSpec } from "./transport-spec.ts";
-import { type McpAsyncErrorSink, safeInterval, safeTimer } from "./wrap.ts";
+import { type McpAsyncErrorSink, mcpInterrupted, safeInterval, safeTimer } from "./wrap.ts";
 
 export type McpTransportConnection = {
 	readonly serverName: string;
@@ -45,10 +45,7 @@ export type CreateMcpTransportOptions = {
 	readonly resolveConfig?: () => Promise<McpServerConfig>;
 };
 
-const SHUTDOWN_GRACE_MS = 100,
-	SHUTDOWN_TERM_WAIT_MS = 400,
-	SHUTDOWN_FINAL_WAIT_MS = 500,
-	SHUTDOWN_CLOSE_WAIT_MS = 400;
+const SHUTDOWN_CLOSE_WAIT_MS = 1400;
 
 export function createMcpTransport(options: CreateMcpTransportOptions): McpTransportConnection {
 	const spec = mcpTransportSpec(options);
@@ -57,6 +54,7 @@ export function createMcpTransport(options: CreateMcpTransportOptions): McpTrans
 
 export async function connectMcpTransport(connection: McpTransportConnection): Promise<void> {
 	let timedOut = false;
+	const started = performance.now();
 	const controller = new AbortController();
 	const captureInterval = safeInterval(
 		"transport.captureRootPid",
@@ -74,15 +72,29 @@ export async function connectMcpTransport(connection: McpTransportConnection): P
 		},
 		connection.asyncErrorSink,
 	);
+	const remaining = () => {
+		const duration = connection.connectTimeoutMs - (performance.now() - started);
+		if (duration <= 0) {
+			timedOut = true;
+			controller.abort();
+		}
+		controller.signal.throwIfAborted();
+		return Math.max(1, Math.ceil(duration));
+	};
 	try {
-		await connection.materialize();
-		await connection.client.connect(connection.transport, {
-			signal: controller.signal,
-			timeout: connection.connectTimeoutMs,
-		});
+		await mcpInterrupted(connection.materialize(), controller.signal);
+		const timeoutMs = remaining();
+		await mcpInterrupted(
+			connection.client.connect(connection.transport, {
+				signal: controller.signal,
+				timeout: timeoutMs,
+			}),
+			controller.signal,
+		);
+		remaining();
 	} catch (error) {
 		await shutdownMcpTransport(connection).catch(() => undefined);
-		if (error instanceof ConnectError && error.phase === "modern-stdio") throw error;
+		if (error instanceof ConnectError && error.phase === "protocol") throw error;
 		if (timedOut) {
 			throw new TimeoutError(
 				`MCP server ${connection.serverName} timed out during connect after ${connection.connectTimeoutMs}ms`,
@@ -103,17 +115,9 @@ export async function connectMcpTransport(connection: McpTransportConnection): P
 }
 
 export async function shutdownMcpTransport(connection: McpTransportConnection): Promise<void> {
-	const rootPid = connection.getRootPid();
-	const closePromise = connection.closeTransport();
-	await delay(SHUTDOWN_GRACE_MS);
-
-	if (rootPid !== null) {
-		await reapProcessTree(rootPid, {
-			killWaitMs: SHUTDOWN_FINAL_WAIT_MS,
-			termWaitMs: SHUTDOWN_TERM_WAIT_MS,
-		});
-	}
-	await Promise.race([closePromise, delay(SHUTDOWN_CLOSE_WAIT_MS)]);
+	// SDK stdio invokes the host process-tree policy for every child, including
+	// disposable probes. Keep one shutdown path instead of reaping the session twice.
+	await Promise.race([connection.closeTransport(), delay(SHUTDOWN_CLOSE_WAIT_MS)]);
 }
 
 function createConnection(
@@ -195,7 +199,8 @@ function createConnection(
 const UNFOLLOWED_REDIRECT = /Redirect to (\S+) not followed/;
 function crossOriginRedirectReason(error: unknown, endpoint: URL | undefined): string | undefined {
 	if (endpoint === undefined || !(error instanceof Error)) return undefined;
-	const code = (error as { code?: unknown }).code;
+	const code =
+		(error as { data?: { status?: unknown }; code?: unknown }).data?.status ?? (error as { code?: unknown }).code;
 	if (typeof code !== "number" || code < 300 || code >= 400) return undefined;
 	const target = UNFOLLOWED_REDIRECT.exec(error.message)?.[1];
 	if (target === undefined) return undefined;

@@ -1,4 +1,4 @@
-import { ProgressSchema, ResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ProgressSchema, ResultSchema } from "../../src/vendor/mcp/core/index.mjs";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
@@ -11,8 +11,8 @@ import { mrtrTui } from "./fixtures/mrtr-presentation.ts";
 
 afterEach(cleanupMrtrLifecycle);
 
-vi.mock("@modelcontextprotocol/sdk/shared/protocol.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("@modelcontextprotocol/sdk/shared/protocol.js")>()),
+vi.mock("../../src/vendor/mcp/client/index.mjs", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../src/vendor/mcp/client/index.mjs")>()),
 	DEFAULT_REQUEST_TIMEOUT_MSEC: 2345,
 }));
 
@@ -23,7 +23,7 @@ describe("MRTR deadlines and settlement", () => {
 		const rejected = expect(pending).rejects.toMatchObject({ code: "MCP_MRTR_TIMEOUT" });
 		await f.transport.received.promise;
 		const options = f.underlying.mock.calls[0]?.[2];
-		f.clock.advance(840000);
+		f.clock.advance(321105);
 		await rejected;
 		expect(options).toMatchObject({
 			timeout: 2345,
@@ -53,7 +53,7 @@ describe("MRTR deadlines and settlement", () => {
 				async () => "UNSENT_VALUE",
 			);
 			await expect(
-				f.client.callTool({ name: "test" }, undefined, mcpRequestOptions(f.origin(ui.presentation))),
+				f.client.callTool({ name: "test" }, mcpRequestOptions(f.origin(ui.presentation))),
 			).rejects.toMatchObject({ code: "MCP_MRTR_CANCELLED" });
 			expect(titles.some((title) => title.includes("third"))).toBe(false);
 			expect(f.transport.calls).toHaveLength(1);
@@ -90,7 +90,7 @@ describe("MRTR deadlines and settlement", () => {
 				if (component instanceof ExtensionSelectorComponent) shown[index++]?.resolve(component);
 			},
 		};
-		const pending = f.client.callTool({ name: "test" }, undefined, mcpRequestOptions(f.origin(ui.presentation)));
+		const pending = f.client.callTool({ name: "test" }, mcpRequestOptions(f.origin(ui.presentation)));
 		const nextWidget = async (at: number) => {
 			const widget = shown[at];
 			if (!widget) throw new Error("Missing widget barrier");
@@ -134,7 +134,6 @@ describe("MRTR deadlines and settlement", () => {
 		});
 		await f.client.callTool(
 			{ name: "test" },
-			undefined,
 			mcpRequestOptions(f.origin(ui.presentation), { timeout: 1000, maxTotalTimeout: 2000 }),
 		);
 		expect(f.underlying.mock.calls[0]?.[2]).toMatchObject({ timeout: 1000, maxTotalTimeout: 2000 });
@@ -143,7 +142,7 @@ describe("MRTR deadlines and settlement", () => {
 	});
 	it("omitted maxTotalTimeout uses the bounded operation duration", async () => {
 		const f = await fixture([undefined]);
-		const pending = f.client.callTool({ name: "test" }, undefined, { timeout: 1000 });
+		const pending = f.client.callTool({ name: "test" }, { timeout: 1000 });
 		const rejected = expect(pending).rejects.toMatchObject({ code: "MCP_MRTR_TIMEOUT" });
 		await f.transport.received.promise;
 		expect(f.underlying.mock.calls[0]?.[2]).toMatchObject({ maxTotalTimeout: 309000, timeout: 1000 });
@@ -157,15 +156,18 @@ describe("MRTR deadlines and settlement", () => {
 		const f = await fixture([undefined]);
 		const updates: unknown[] = [];
 		const progressed = Promise.withResolvers<void>();
-		const pending = f.client.callTool({ name: "test" }, undefined, {
-			timeout: 1000,
-			maxTotalTimeout: 2000,
-			resetTimeoutOnProgress: true,
-			onprogress: (progress) => {
-				updates.push(progress);
-				progressed.resolve();
+		const pending = f.client.callTool(
+			{ name: "test" },
+			{
+				timeout: 1000,
+				maxTotalTimeout: 2000,
+				resetTimeoutOnProgress: true,
+				onprogress: (progress) => {
+					updates.push(progress);
+					progressed.resolve();
+				},
 			},
-		});
+		);
 		const rejected = expect(pending).rejects.toMatchObject({ code: "MCP_MRTR_TIMEOUT" });
 		await f.transport.received.promise;
 		f.clock.advance(1999);
@@ -192,7 +194,6 @@ describe("MRTR deadlines and settlement", () => {
 		const binding = {};
 		const first = f.client.callTool(
 			{ name: "test" },
-			undefined,
 			mcpRequestOptions(f.origin(ui.presentation, binding), { timeout: 1000, maxTotalTimeout: 10000 }),
 		);
 		const firstRejected = expect(first).rejects.toMatchObject({ code: "MCP_MRTR_CONTEXT_CHANGED" });
@@ -200,7 +201,6 @@ describe("MRTR deadlines and settlement", () => {
 		const secondSent = (f.transport.received = Promise.withResolvers<void>());
 		const second = f.client.callTool(
 			{ name: "test" },
-			undefined,
 			mcpRequestOptions(f.origin(ui.presentation, binding), { timeout: 1000, maxTotalTimeout: 100 }),
 		);
 		const secondRejected = expect(second).rejects.toMatchObject({ code: "MCP_MRTR_TIMEOUT" });
@@ -224,17 +224,16 @@ describe("MRTR deadlines and settlement", () => {
 			return choices[0];
 		});
 		await expect(
-			f.client.callTool(
-				{ name: "test" },
-				undefined,
-				mcpRequestOptions(f.origin(ui.presentation), { signal: caller.signal }),
-			),
+			f.client.callTool({ name: "test" }, mcpRequestOptions(f.origin(ui.presentation), { signal: caller.signal })),
 		).rejects.toMatchObject({ code: "MCP_MRTR_CANCELLED" });
 		expect(f.transport.calls).toHaveLength(1);
 		expect(f.transport.cancellations).toHaveLength(0);
 	});
 	it("raw request uses the same MRTR adapter and final custom schema", async () => {
-		const f = await fixture([{ resultType: "input_required", requestState: "" }, { final: 42 }]);
+		const f = await fixture([
+			{ resultType: "input_required", requestState: "", inputRequests: {} },
+			{ content: [], final: 42 },
+		]);
 		const result = await f.client.request(
 			{ method: "tools/call", params: { name: "test" } },
 			ResultSchema.pick({}).extend({ final: ProgressSchema.shape.progress }).strip(),

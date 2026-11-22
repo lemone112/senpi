@@ -157,10 +157,21 @@ classified as usage errors, write usage to stderr, and exit with status `2`.
 
 `--with-mcp-tool <tool> --tool-args '<json object>'` uses the same two-turn
 loop but requires a fixture MCP-style tool name such as `mcp_fx_tool_1`. The
-script generates a sandbox extension that registers the requested
-`mcp_fx_tool_<n>` as a proxy to the local MCP stdio fixture's `tool_<n>`, then
-asserts both that the proxy wrote its fixture call log and that the model's
-second request contains the fixture result text.
+script writes `mcp.json` in the sandbox agent directory and enables the CLI's
+ordinary builtins, including MCP and permission enforcement. The builtin service
+discovers the local stdio fixture and registers `mcp_fx_tool_<n>` through its
+native SDK. This scenario drives the CLI over RPC: its first command is the prompt,
+and the configured `startupTimeoutMs` bounds the CLI's wait for the catalog.
+An extension only records the
+resulting `tool_result`; it creates no service, proxy client or replacement tool.
+The check requires the tool in the first model request and its successful fixture
+result in the second request.
+The QA command supplies an explicit permission rule for that one fixture tool;
+it does not manufacture a permission response or disable the builtin authorizer.
+The public inventory is read after completion for diagnostics; the harness never
+waits for readiness before prompting, so it also detects cold-first-request failures.
+Other mock scenarios retain `--no-extensions` isolation; it is unsuitable for
+this scenario because it also disables builtins and their permission authorizer.
 
 ```bash
 node .agents/skills/senpi-qa/scripts/mock-loop.mjs \
@@ -168,8 +179,8 @@ node .agents/skills/senpi-qa/scripts/mock-loop.mjs \
   --tool-args '{"value":"ok","mode":"alpha"}'
 ```
 
-This proves the model can request a registered MCP fixture tool through the
-live agent-loop surface. Non-`mcp_*` names and names outside the
+This proves discovery, production tool registration, execution and model delivery
+through the live agent-loop surface. Non-`mcp_*` names and names outside the
 `mcp_fx_tool_<n>` fixture family fail before the CLI run; missing registration
 or a tool-not-found fallback fails because no fixture call log/result appears.
 With `--evidence <slug>`, the script writes sanitized model requests and

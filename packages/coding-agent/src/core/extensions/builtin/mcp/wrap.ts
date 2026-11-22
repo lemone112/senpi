@@ -1,12 +1,11 @@
 // Type-only re-exports: a value re-export would put the whole MCP SDK back into
 // the CLI's startup import graph (see sdk.lazy.ts). Callers that need the
 // classes themselves load them through that boundary.
-export type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-export type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-export type { CallToolResult, ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
+export type { Client } from "../../../../vendor/mcp/client/index.mjs";
+export type { CallToolResult, ListToolsResult } from "../../../../vendor/mcp/client/index.mjs";
 
 import type { EventEmitter } from "node:events";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
 import type { EventBus } from "../../../event-bus.ts";
 import { redactMcpLogText } from "./log.ts";
 

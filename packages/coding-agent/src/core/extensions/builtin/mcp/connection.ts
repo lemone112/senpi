@@ -1,5 +1,5 @@
 import { dirname } from "node:path";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
 import { resolveServerAuth } from "./auth/context.ts";
 import type { McpOAuthProvider } from "./auth/oauth-provider.ts";
 import type {
@@ -362,7 +362,7 @@ export class ServerConnection {
 			if (generation !== this.#generation || this.#state === "disabled") {
 				throw this.#connectError(`MCP server ${this.serverName} connect was superseded`, "connect", true);
 			}
-			if (error instanceof ConnectError && error.phase === "modern-stdio") {
+			if (error instanceof ConnectError && error.phase === "protocol") {
 				this.markDegraded(error);
 				throw error;
 			}

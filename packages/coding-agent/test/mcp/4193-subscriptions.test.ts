@@ -112,7 +112,7 @@ it("4193 connection renewal closes its old stream and reestablishes subscription
 	try {
 		const first = fixture.next("subscriptions/listen");
 		await fixture.client.listTools();
-		const original = await first;
+		await first;
 		const oldStream = fixture.streams[0]?.response;
 		if (!oldStream) throw new Error("Missing old subscription stream");
 		const closed = new Promise<void>((resolve) => oldStream.once("close", resolve));
@@ -120,7 +120,8 @@ it("4193 connection renewal closes its old stream and reestablishes subscription
 		await closed;
 		const renewed = fixture.next("subscriptions/listen");
 		await fixture.connection.client.listTools();
-		expect((await renewed).id).not.toBe(original.id);
+		await renewed;
+		expect(fixture.streams.at(-1)?.response).not.toBe(oldStream);
 	} finally {
 		await fixture.close();
 	}

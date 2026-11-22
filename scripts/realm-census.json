@@ -4787,22 +4787,6 @@
 			"class": "per-copy-safe",
 			"reason": "side table keyed by objects this copy creates and reads; a key from another copy is never presented to it"
 		},
-		"packages/coding-agent/src/core/extensions/builtin/mcp/modern/dispatch.ts#clientInfo": {
-			"class": "constant",
-			"reason": "lookup data literal; never written after load"
-		},
-		"packages/coding-agent/src/core/extensions/builtin/mcp/modern/dispatch.ts#probeOptions": {
-			"class": "constant",
-			"reason": "lookup data literal; never written after load"
-		},
-		"packages/coding-agent/src/core/extensions/builtin/mcp/modern/era.ts#discoverySchema": {
-			"class": "constant",
-			"reason": "schema or descriptor built once at load; never written after load"
-		},
-		"packages/coding-agent/src/core/extensions/builtin/mcp/modern/era.ts#modernError": {
-			"class": "constant",
-			"reason": "value computed or aliased at load; never written after load"
-		},
 		"packages/coding-agent/src/core/extensions/builtin/mcp/modern/request.ts#capableMethods": {
 			"class": "constant",
 			"reason": "lookup collection filled at load; never written after load"
@@ -4814,6 +4798,10 @@
 		"packages/coding-agent/src/core/extensions/builtin/mcp/modern/request.ts#states": {
 			"class": "per-copy-safe",
 			"reason": "side table keyed by objects this copy creates and reads; a key from another copy is never presented to it"
+		},
+		"packages/coding-agent/src/core/extensions/builtin/mcp/modern/sdk-subscriptions.ts#coordinators": {
+			"class": "per-copy-safe",
+			"reason": "physical SDK clients are constructed by this MCP service copy; their subscription coordinator is registered and consumed by the same copy"
 		},
 		"packages/coding-agent/src/core/extensions/builtin/mcp/modern/tool-schema.ts#metaSchemaChecker": {
 			"class": "per-copy-safe",
@@ -4862,6 +4850,10 @@
 		"packages/coding-agent/src/core/extensions/builtin/mcp/notification-schemas.ts#ToolListChangedNotificationSchema": {
 			"class": "constant",
 			"reason": "schema or descriptor built once at load; never written after load"
+		},
+		"packages/coding-agent/src/core/extensions/builtin/mcp/notification-schemas.ts#receivers": {
+			"class": "per-copy-safe",
+			"reason": "receivers are keyed by physical SDK clients constructed by this MCP service copy and dispatched only by its native subscription coordinator"
 		},
 		"packages/coding-agent/src/core/extensions/builtin/mcp/process-tree.ts#execFileAsync": {
 			"class": "constant",
@@ -4944,10 +4936,6 @@
 			"reason": "memoized lazy importer; each copy imports its own module, a split only repeats the import"
 		},
 		"packages/coding-agent/src/core/extensions/builtin/mcp/sdk.lazy.ts#loadMcpSdkTypes": {
-			"class": "per-copy-safe",
-			"reason": "memoized lazy importer; each copy imports its own module, a split only repeats the import"
-		},
-		"packages/coding-agent/src/core/extensions/builtin/mcp/sdk.lazy.ts#loadMcpSdkZodCompat": {
 			"class": "per-copy-safe",
 			"reason": "memoized lazy importer; each copy imports its own module, a split only repeats the import"
 		},

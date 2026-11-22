@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export interface ImportGraphProbeResult {
 	entries: Array<{ phase: "resolve" | "load"; specifier?: string; url: string }>;
@@ -43,8 +44,9 @@ registerHooks({
 `;
 
 const driverSource = `
+import { pathToFileURL } from "node:url";
 const before = new Set(Reflect.ownKeys(globalThis).map(String));
-await import(process.argv[2]);
+await import(pathToFileURL(process.argv[2]).href);
 const globalsAdded = Reflect.ownKeys(globalThis).map(String).filter((key) => !before.has(key));
 console.log(JSON.stringify({ globalsAdded }));
 `;
@@ -79,7 +81,12 @@ function runImportProbe(repoRoot: string, targetPath: string, scratchPrefix: str
 	// 70 modules, model-runtime 1,280). It was harmful: the link lived in the shared tree, so a host child in another
 	// worker could resolve pi-ai through it and then read dist/index.js after the probe removed it.
 	try {
-		const args = ["--import", join(scratch, "register.mjs"), join(scratch, "driver.mjs"), targetPath];
+		const args = [
+			"--import",
+			pathToFileURL(join(scratch, "register.mjs")).href,
+			join(scratch, "driver.mjs"),
+			targetPath,
+		];
 		// Node's loader hooks are the probe, including when Vitest itself runs under Bun.
 		const child = spawnSync(process.versions.bun ? "node" : process.execPath, args, {
 			cwd: repoRoot,

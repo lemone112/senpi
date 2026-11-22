@@ -28,7 +28,7 @@ describe("MRTR request ownership", () => {
 			isCurrent: () => a.state === "connected",
 			resolveAuthority: async () => null,
 		});
-		expect((await a.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin))).content).toEqual([
+		expect((await a.client.callTool({ name: "fixture" }, mcpRequestOptions(origin))).content).toEqual([
 			{ type: "text", text: "final tool" },
 		]);
 		await expect(b.client.callTool({ name: "fixture" })).rejects.toMatchObject({
@@ -133,7 +133,7 @@ describe("MRTR request ownership", () => {
 			isCurrent: () => a.state === "connected",
 			resolveAuthority: async () => null,
 		});
-		const pending = a.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin));
+		const pending = a.client.callTool({ name: "fixture" }, mcpRequestOptions(origin));
 		const rejected = expect(pending).rejects.toMatchObject({ code: "MCP_MRTR_CONTEXT_CHANGED" });
 		await shown.promise;
 		await a.bumpGeneration();
@@ -159,7 +159,7 @@ describe("MRTR request ownership", () => {
 			isCurrent: () => a.state === "connected",
 			resolveAuthority: async () => null,
 		});
-		const pending = a.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin));
+		const pending = a.client.callTool({ name: "fixture" }, mcpRequestOptions(origin));
 		const rejected = expect(pending).rejects.toMatchObject({ code: "MCP_MRTR_CONTEXT_CHANGED" });
 		await shown.promise;
 		await a.dispose();
@@ -190,7 +190,6 @@ describe("MRTR request ownership", () => {
 						},
 					},
 				},
-				undefined,
 				mcpRequestOptions(origin),
 			),
 		).rejects.toMatchObject({ code: "MCP_MRTR_PROCESSING_UNAVAILABLE" });
@@ -217,7 +216,7 @@ describe("MRTR request ownership", () => {
 			isCurrent: () => true,
 			resolveAuthority: resolve,
 		});
-		await expect(a.client.callTool({ name: "fixture" }, undefined, mcpRequestOptions(origin))).rejects.toMatchObject({
+		await expect(a.client.callTool({ name: "fixture" }, mcpRequestOptions(origin))).rejects.toMatchObject({
 			code: "MCP_MRTR_CONTEXT_CHANGED",
 		});
 		expect(resolve).toHaveBeenCalled();

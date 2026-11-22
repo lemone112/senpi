@@ -1,35 +1,18 @@
 /**
- * Local zod definitions of the four server -> client notifications this client
- * subscribes to, plus the narrow client seam they register through.
- *
- * WHY NOT THE SDK'S SCHEMAS: `setNotificationHandler(schema, handler)` reads
- * the schema's method literal SYNCHRONOUSLY at registration time, and the three
- * subscribe helpers (`notifications.ts`, `resources.ts`, `logging.ts`) are
- * synchronous by contract. Importing `@modelcontextprotocol/sdk/types.js` for
- * them would drag the whole SDK back into the startup import graph, so the four
- * shapes are declared here instead — they are the stable, frozen part of the
- * MCP wire protocol, and only `notifications/message` carries a payload this
- * client actually reads. The SDK still does the parsing: it runs whichever
- * schema it is handed before invoking the handler.
- *
- * Fidelity to the SDK (`types.js`): the notification envelope is a stripping
- * object over `{ method, params }`, `params` carries an optional passthrough
- * `_meta`, and the list-changed notifications take no other parameters.
- *
- * WHY `zod/v3`: the SDK's compat layer parses a v3 schema through the schema's
- * OWN `safeParse`, so parsing never crosses between this package's zod and the
- * copy bundled with the SDK. WHY {@link McpNotificationClient}: the SDK types
- * its schema parameter against ITS bundled zod, and checking a schema built
- * from this package's zod against that copy's generic constraint exhausts the
- * type checker (TS2589). The seam below keeps the schema opaque to the SDK
- * signature while {@link registerMcpNotificationHandler} still ties the
- * handler's payload type to the schema that validates it.
+ * Lightweight validation for host catalog/resource/log receivers. These synchronous
+ * registrations stay outside the lazy SDK graph. The same receiver handles legacy
+ * method notifications and the native SDK listen callback's acknowledged stream.
  */
 import { type ZodType, z } from "zod/v3";
 
 /** The one method of the SDK client these subscriptions use. */
 export interface McpNotificationClient<TNotification> {
-	setNotificationHandler(schema: unknown, handler: (notification: TNotification) => void): void;
+	setNotificationHandler(method: string, handler: (notification: TNotification) => void): void;
+}
+
+const receivers = new WeakMap<object, Map<string, (notification: unknown) => void>>();
+export function dispatchMcpNotification(client: object, notification: { method: string }): void {
+	receivers.get(client)?.get(notification.method)?.(notification);
 }
 
 export function registerMcpNotificationHandler<TNotification>(
@@ -37,7 +20,15 @@ export function registerMcpNotificationHandler<TNotification>(
 	schema: ZodType<TNotification>,
 	handler: (notification: TNotification) => void,
 ): void {
-	client.setNotificationHandler(schema, handler);
+	const method = (schema as unknown as { shape: { method: { value: string } } }).shape.method.value;
+	const receive = (notification: unknown) => {
+		const parsed = schema.safeParse(notification);
+		if (parsed.success) handler(parsed.data);
+	};
+	let handlers = receivers.get(client);
+	if (!handlers) receivers.set(client, (handlers = new Map()));
+	handlers.set(method, receive);
+	client.setNotificationHandler(method, receive);
 }
 
 export interface McpListChangedNotification {

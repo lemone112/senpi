@@ -150,6 +150,7 @@ describe("McpOAuthProvider + flows", () => {
 		const manager = new McpRefreshManager(provider);
 		await expect(manager.ensureFresh()).rejects.toMatchObject({ oauthKind: "invalid_grant", terminal: true });
 		expect(store.read()).toBeUndefined();
+		expect((await fixture.getLog()).tokenHits).toBe(1);
 	});
 
 	it("retries a transient token endpoint failure without clearing credentials (needs_auth NOT set)", async () => {
@@ -168,6 +169,6 @@ describe("McpOAuthProvider + flows", () => {
 		// Credentials preserved for the next attempt.
 		expect(store.read()?.refreshToken).toBe("RT_TRANSIENT");
 		const log = await fixture.getLog();
-		expect(log.tokenHits).toBeGreaterThanOrEqual(3);
+		expect(log.tokenHits).toBe(3);
 	});
 });

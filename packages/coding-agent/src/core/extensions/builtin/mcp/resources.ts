@@ -12,7 +12,7 @@
 // refresh path, so the catalog cache stays current.
 
 import { Text } from "@earendil-works/pi-tui";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
 import { type Static, Type } from "typebox";
 import { redactResolvedReferenceData, redactResolvedReferenceValues } from "../../../config-reference-redaction.ts";
 import type { ToolDefinition } from "../../types.ts";

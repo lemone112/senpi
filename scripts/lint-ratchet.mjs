@@ -101,6 +101,8 @@ export const lint = (root) => {
   const files = listed.stdout
     .split("\0")
     .filter((file) => SOURCE.test(file) && !MINIFIED.test(file))
+    // Audited upstream output is reproduced from pinned archives, not hand-edited source.
+    .filter((file) => !file.startsWith("packages/coding-agent/src/vendor/mcp/"))
     // A tracked path missing on disk (an unchecked-out submodule) is not linted either.
     .filter((file) => NodeFS.existsSync(NodePath.join(root, file)));
   const diagnostics = [];

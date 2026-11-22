@@ -1,7 +1,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
-import type { Progress } from "@modelcontextprotocol/sdk/types.js";
+import type { Progress } from "../../../../../vendor/mcp/client/index.mjs";
 import type { TSchema } from "typebox";
 import { redactResolvedReferenceData, redactResolvedReferenceValues } from "../../../../config-reference-redaction.ts";
 import type { ToolDefinition } from "../../../types.ts";

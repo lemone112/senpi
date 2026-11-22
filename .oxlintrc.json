@@ -331,6 +331,7 @@
     "**/api/cursor-agent/gen/**",
     "**/*.models.ts",
     "packages/mom/data/**",
+    "packages/coding-agent/src/vendor/mcp/**",
     "packages/senpi-codemode/src/kernels/sandbox/vendor/**",
     "packages/senpi-codemode/test/sandbox/vendor/**"
   ]

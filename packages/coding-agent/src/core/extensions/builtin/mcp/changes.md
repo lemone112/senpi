@@ -1,3 +1,31 @@
+## 2026-11-22 - Native modular SDK transport and task subscriptions
+
+### What changed
+
+- `sdk.lazy.ts` loads the pinned modular MCP SDK client/core from `src/vendor/mcp`. The shipped package includes declarations and licenses; `vendor/mcp-sdk` records exact source patches and reproducible build inputs. SDK1 remains a development dependency for independent legacy peers.
+- `transport-sdk.ts` uses SDK stdio and Streamable HTTP transports. `modern/dispatch.ts` delegates discovery, version selection, legacy initialize and framing to SDK automatic negotiation. The former `era`, `wire`, `sdk-bridge`, `stdio-probe`, `transport` and `subscriptions` protocol implementations are removed.
+- `modern/sdk-subscriptions.ts` coordinates native `Client.listen()` for catalog changes, resource URIs and observed task IDs per physical connection. The receiver exists before ACK and the bootstrap `tasks/get`; a terminal notification cannot be overwritten by an older bootstrap. Honored tasks wait for notifications without recurring reads. Only an explicit omitted ID permits snapshot polling. Replacement refusal preserves receivers covered by the existing stream.
+- Malformed notifications and replacement ACKs that omit a previously honored task end its observation promptly. Only the host's own abort identifies an intentional stream close. Async authority and credential identity are checked before each initial/replacement task subscription and every task update, including pushed progress and terminal results. Revoked observers cannot appear in a new wire filter.
+- `transport.ts` applies one monotonic connection budget across configuration resolution, materialization and native negotiation; `modern/dispatch.ts` rejects late activation after cancellation. HTTP discovery uses the remaining connection budget. The SDK recovers a provisional stdio fallback once when legacy initialization explicitly reports method/version mismatch; silent legacy servers still receive their initialization budget.
+- The first real turn observes its own uncached startup catalogs within `startupTimeoutMs`, without delaying session admission or previews. A timed-out catalog remains explicitly connecting in model context and publishes normally when ready.
+- Prompt preparation now supplies `ctx.signal` before the agent run exists. Caller cancellation and public session abort stop this wait and prevent provider admission; background MCP discovery keeps its independent connection lifetime.
+- `modern/request.ts` retains request-local human authority, consent limits, deadlines and credential/generation fences. `modern/transport-policy.ts` installs private diagnostics and HTTP response correlation after SDK negotiation. Session references, follow-up admission and native emitted receipts remain in `session-tasks.ts`; Events are not mapped to Tasks.
+- The small Senpi SDK overlay resolves fresh stdio parameters before every probe/session spawn, disables SDK default environment merging for project processes, and separates `modernCapabilities` from legacy connection capabilities. Default SDK behavior is preserved when these options are omitted. Modern discovery/catalog claim no human presenter; the issuing request supplies its own capability.
+- SDK stdio calls the existing host process-tree cleanup before closing probe and session children, so disposable Linux probes cannot leave descendants running. Private elicitation middleware sanitizes SDK request/result validation errors before wire responses and OpenTelemetry. OAuth retry classification uses SDK2's public error code and retains the verified response issuer during code exchange.
+
+### Why
+
+The older host reproduced modern protocol internals around SDK1 and polled accepted tasks. Native subscriptions remove that duplicate implementation and recurring reads while preserving durable delivery and private input.
+
+### Why an extension could not handle it
+
+The built-in MCP service owns physical connection sharing, project spawn policy, invocation authority and durable task observation. These guarantees must hold before an extension receives a result or notification.
+
+### Expected merge conflict zones
+
+- MEDIUM: lazy SDK imports, request adapter and transport materialization.
+- LOW: subscription coordinator, vendor build scripts and transport policy. Earlier entries below describe historical implementations; this entry supersedes their protocol ownership descriptions.
+
 ## 2026-11-12 - The MCP config loader checks a candidate without loading it (senpi#6485)
 
 ### What changed

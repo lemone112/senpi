@@ -1804,6 +1804,7 @@ export class AgentSession {
 	private _hadClearedQueuedMessages = false;
 	private _closedOnRequest = false;
 	private _extensionEventSignal: AbortSignal | undefined = undefined;
+	private readonly _beforeAgentStartAborts = new Set<AbortController>();
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
@@ -6866,11 +6867,12 @@ export class AgentSession {
 			// Emit before_agent_start extension event
 			this._refreshToolDeclarationsForModel();
 			this._promptCachePrefixBuilds.cancelAll();
-			const result = await this._extensionRunner.emitBeforeAgentStart(
+			const result = await this._emitBeforeAgentStart(
 				expandedText,
 				currentImages,
 				this._baseSystemPrompt,
 				this._baseSystemPromptOptions,
+				{ signal: options.signal },
 			);
 			this._applyBeforeAgentStartResult(messages, result, userMessage);
 
@@ -7993,7 +7995,7 @@ export class AgentSession {
 					await this._enforceCompactionBeforeProvider(this._findLastAssistantMessage(), false, "pre_prompt");
 					this._refreshToolDeclarationsForModel();
 					this._promptCachePrefixBuilds.cancelAll();
-					const result = await this._extensionRunner.emitBeforeAgentStart(
+					const result = await this._emitBeforeAgentStart(
 						contentText(appMessage.content, ""),
 						undefined,
 						this._baseSystemPrompt,
@@ -8018,6 +8020,7 @@ export class AgentSession {
 					// of silently dropping it (the fire-and-forget extension action
 					// swallows this rejection).
 					queueTriggerForLater();
+					if (userAbortGeneration !== this._userAbortGeneration) return;
 					throw error;
 				} finally {
 					this._triggerTurnAdmissionAbortGeneration = undefined;
@@ -10624,6 +10627,7 @@ export class AgentSession {
 	}
 
 	private async _abortActiveAgentAndRetry(source: "user" | "system"): Promise<void> {
+		for (const abort of this._beforeAgentStartAborts) abort.abort();
 		this.abortRetry();
 		this.abortBranchSummary();
 		if (this._userAbortPromise === undefined) {
@@ -10653,6 +10657,27 @@ export class AgentSession {
 			if (this._userAbortPromise === abortPromise) {
 				this._userAbortPromise = undefined;
 			}
+		}
+	}
+
+	/** Preparation runs before the agent has a run signal, but still belongs to the caller's cancellation. */
+	private async _emitBeforeAgentStart(...args: Parameters<ExtensionRunner["emitBeforeAgentStart"]>) {
+		const abort = new AbortController();
+		const options = args[4];
+		const signal = options?.signal ? AbortSignal.any([options.signal, abort.signal]) : abort.signal;
+		this._beforeAgentStartAborts.add(abort);
+		try {
+			const result = await this._extensionRunner.emitBeforeAgentStart(
+				args[0],
+				args[1],
+				args[2],
+				args[3],
+				{ ...options, signal },
+			);
+			signal.throwIfAborted();
+			return result;
+		} finally {
+			this._beforeAgentStartAborts.delete(abort);
 		}
 	}
 

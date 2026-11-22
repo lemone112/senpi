@@ -10,7 +10,7 @@
 // dialog can never wedge the tool-call pipeline. URL mode is deliberately not
 // implemented in v1.
 
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
 import type { ExtensionUIContext } from "../../types.ts";
 import { privateMcpForms } from "../../../mcp-form-types.ts";
 import { legacyMcpCallerUi, legacyMcpOperation } from "./request-origin.ts";
@@ -61,8 +61,8 @@ export function setMcpElicitationUiProvider(provider: McpElicitationUiProvider |
 }
 
 async function rejectElicitation(): Promise<never> {
-	const { ErrorCode, McpError } = await loadMcpSdkTypes();
-	throw new McpError(ErrorCode.InternalError, "Elicitation cannot be processed");
+	const { ProtocolErrorCode, ProtocolError } = await loadMcpSdkTypes();
+	throw new ProtocolError(ProtocolErrorCode.InternalError, "Elicitation cannot be processed");
 }
 
 export function legacyMcpFormEligible(provider: McpElicitationUiProvider | undefined, enabled: boolean): boolean {
@@ -74,8 +74,8 @@ export function legacyMcpFormEligible(provider: McpElicitationUiProvider | undef
 }
 
 async function rejectPrivateElicitation(): Promise<never> {
-	const { ErrorCode, McpError } = await loadMcpSdkTypes();
-	throw new McpError(ErrorCode.InternalError, "Elicitation processing unavailable");
+	const { ProtocolErrorCode, ProtocolError } = await loadMcpSdkTypes();
+	throw new ProtocolError(ProtocolErrorCode.InternalError, "Elicitation processing unavailable");
 }
 
 async function privateElicitation(
@@ -125,26 +125,47 @@ export async function configureMcpElicitation(
 	timeoutMs: number = MCP_ELICITATION_TIMEOUT_MS,
 	elicitationEnabled = true,
 ): Promise<void> {
+	client.use("elicitation/create", async (request, context, next) => {
+		const caller = legacyMcpCallerUi(client);
+		const ui =
+			caller === "refuse"
+				? undefined
+				: caller !== undefined
+					? caller.ui
+					: typeof owner === "function"
+						? owner()
+						: owner?.getMcpElicitationUi();
+		const privateRequest =
+			(typeof owner === "function" && owner.enforced?.()) || (ui !== undefined && privateMcpForms(ui) !== undefined);
+		try {
+			return await next(request, context);
+		} catch (error) {
+			// SDK request/result validation surrounds the handler. Middleware catches
+			// its errors before protocol responses or telemetry can retain form fields.
+			if (privateRequest) return rejectPrivateElicitation();
+			throw error;
+		}
+	});
 	if (!elicitationEnabled) {
 		// The SDK requires an advertised capability for setRequestHandler.
 		// Its public fallback handles unsolicited requests without claiming UI support.
-		const { ErrorCode, McpError } = await loadMcpSdkTypes();
+		const { ProtocolErrorCode, ProtocolError } = await loadMcpSdkTypes();
 		client.fallbackRequestHandler = async (request) => {
 			if (request.method === "elicitation/create")
 				return typeof owner === "function" && owner.enforced?.() ? rejectPrivateElicitation() : rejectElicitation();
-			throw new McpError(ErrorCode.MethodNotFound, "Method not found");
+			throw new ProtocolError(ProtocolErrorCode.MethodNotFound, "Method not found");
 		};
 		return;
 	}
-	const { ElicitRequestSchema } = await loadMcpSdkTypes();
+
 	if (typeof owner === "function" && owner.enforced?.()) {
-		// Private validation prevents SDK error.data from echoing malformed form bodies.
-		client.setRequestHandler(ElicitRequestSchema.omit({ params: true }).passthrough(), (request, extra) =>
-			privateElicitation(client, request.params, extra.signal, extra.requestId, timeoutMs),
+		// The middleware above also protects validation performed by the SDK.
+		client.setRequestHandler("elicitation/create", (request, extra) =>
+			privateElicitation(client, request.params, extra.mcpReq.signal, extra.mcpReq.id, timeoutMs),
 		);
 		return;
 	}
-	client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
+	client.setRequestHandler("elicitation/create", async (request, extra) => {
 		const params = request.params;
 		// URL mode is deliberately unsupported in v1 (form mode only).
 		if (!("requestedSchema" in params)) return rejectElicitation();
@@ -155,7 +176,7 @@ export async function configureMcpElicitation(
 		const enforced =
 			(typeof owner === "function" && owner.enforced?.()) || (ui !== undefined && privateMcpForms(ui) !== undefined);
 		if (enforced) {
-			return privateElicitation(client, params, extra.signal, extra.requestId, timeoutMs);
+			return privateElicitation(client, params, extra.mcpReq.signal, extra.mcpReq.id, timeoutMs);
 		}
 		if (ui === undefined) return rejectElicitation();
 		return await runElicitationForm(ui, params.message, params.requestedSchema, timeoutMs);

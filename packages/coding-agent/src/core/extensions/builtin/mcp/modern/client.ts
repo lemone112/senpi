@@ -1,4 +1,4 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../../../vendor/mcp/client/index.mjs";
 import {
 	type McpElicitationUiProvider,
 	configureMcpElicitation,
@@ -21,8 +21,13 @@ export async function createMcpRequestClient(
 	protocol.legacyFormEligible = legacyEligible;
 	const client = new Client(
 		{ name: "senpi-mcp-client", version: "0.0.0" },
-		{ capabilities: mcpClientCapabilities(legacyEligible) },
+		{
+			capabilities: mcpClientCapabilities(legacyEligible),
+			modernCapabilities: {},
+			inputRequired: { autoFulfill: false },
+		},
 	);
+	client.acceptResultType("tools/call", "task");
 	await configureMcpElicitation(client, uiProvider, undefined, legacyEligible);
 	installModernRequestAdapter(client, protocol, mcpElapsedClock, readCredential);
 	return client;

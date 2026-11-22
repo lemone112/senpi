@@ -1,4 +1,4 @@
-import type { OAuthDiscoveryState, OAuthServerInfo } from "@modelcontextprotocol/sdk/client/auth.js";
+import type { OAuthDiscoveryState, OAuthServerInfo } from "../../../../../vendor/mcp/client/index.mjs";
 import { OAuthFlowError } from "./oauth-errors.ts";
 import type { McpStoredAuth } from "./token-store.ts";
 

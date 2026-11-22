@@ -1000,9 +1000,6 @@
   "packages/coding-agent/src/core/extensions/builtin/herdr/herdr-client.ts": {
     "typescript/no-non-null-assertion": 1
   },
-  "packages/coding-agent/src/core/extensions/builtin/mcp/modern/transport.test.ts": {
-    "senpi-testing/no-flake-masking": 2
-  },
   "packages/coding-agent/src/core/extensions/builtin/terminal/file-monitor-check.ts": {
     "typescript/no-non-null-assertion": 2
   },

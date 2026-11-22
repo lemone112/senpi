@@ -4,7 +4,7 @@ import type { ExtensionUIContext } from "../../../src/core/extensions/types.ts";
 import { markMcpFormPresented, type McpFormInput } from "../../../src/core/mcp-form-types.ts";
 import { registerLocalMcpPresenter } from "../../../src/modes/interactive/mcp-local-presenter.ts";
 import type { PresenterAccountAuthority } from "../../../src/modes/rpc/mcp-presenter-account.ts";
-import { socketSecretPath } from "../../../src/modes/rpc/socket-transport.ts";
+import { resolveSocketTransportAddress, socketSecretPath } from "../../../src/modes/rpc/socket-transport.ts";
 import { startEndpoint } from "../../helpers/session-control-fixture.ts";
 import { createHarness } from "../../suite/harness.ts";
 import { enroll, installation, issuer, signedCommand } from "./presenter-account-host.ts";
@@ -43,12 +43,13 @@ export class ControlClient {
 	}
 
 	static async open(path: string): Promise<ControlClient> {
-		const socket = createConnection(path);
+		const secret = readFileSync(socketSecretPath(path));
+		const socket = createConnection(resolveSocketTransportAddress(path, process.platform, secret));
 		await new Promise<void>((resolve, reject) => {
 			socket.once("connect", resolve);
 			socket.once("error", reject);
 		});
-		socket.write(readFileSync(socketSecretPath(path)));
+		socket.write(secret);
 		return new ControlClient(socket);
 	}
 

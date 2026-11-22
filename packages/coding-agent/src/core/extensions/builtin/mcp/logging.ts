@@ -9,7 +9,7 @@
 // flood the ring buffer — the final message of a burst always lands because
 // the bucket refills continuously.
 
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
 import type { McpLogger } from "./log.ts";
 import { LoggingMessageNotificationSchema, registerMcpNotificationHandler } from "./notification-schemas.ts";
 

@@ -14,15 +14,16 @@
  * through any re-export chain — reappears and fails this test.
  */
 import { describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
 import { probeImportGraph } from "../../helpers/esm-import-graph-probe.ts";
 import { assertWorkspaceBuildPrerequisite } from "../../support/workspace-build-prerequisite.ts";
 
 assertWorkspaceBuildPrerequisite(import.meta.url);
 
-const repoRoot = new URL("../../../../..", import.meta.url).pathname;
+const repoRoot = fileURLToPath(new URL("../../../../..", import.meta.url));
 
 /** Matches the package root so a transitive edge cannot slip through under a different specifier. */
-const MCP_SDK_PATTERN = /\/node_modules\/@modelcontextprotocol\//u;
+const MCP_SDK_PATTERN = /\/(?:node_modules\/@modelcontextprotocol|vendor\/mcp)\//u;
 
 describe("#1781 lazy MCP SDK", () => {
 	it("does not statically reach @modelcontextprotocol/sdk from dist/main.js", () => {

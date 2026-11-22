@@ -92,9 +92,12 @@ describe("MCP failure diagnosis", () => {
 		await connection.connect();
 		await connection.client.listTools({}, { timeout: 2000 });
 		const result = await withMcpSessionExpiryRetry(connection, () =>
-			connection.client.callTool({ name: "tool_1", arguments: { value: "after-renew" } }, undefined, {
-				timeout: 2000,
-			}),
+			connection.client.callTool(
+				{ name: "tool_1", arguments: { value: "after-renew" } },
+				{
+					timeout: 2000,
+				},
+			),
 		);
 		let forcedExpiryAttempts = 0;
 
@@ -104,9 +107,12 @@ describe("MCP failure diagnosis", () => {
 			withMcpSessionExpiryRetry(connection, async () => {
 				forcedExpiryAttempts += 1;
 				if (forcedExpiryAttempts === 1) {
-					await connection.client.callTool({ name: "tool_1", arguments: { value: "stale" } }, undefined, {
-						timeout: 2000,
-					});
+					await connection.client.callTool(
+						{ name: "tool_1", arguments: { value: "stale" } },
+						{
+							timeout: 2000,
+						},
+					);
 				}
 				throw mcpSessionExpiredError();
 			}),

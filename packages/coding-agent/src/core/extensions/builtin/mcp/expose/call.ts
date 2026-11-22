@@ -1,4 +1,4 @@
-import type { Progress } from "@modelcontextprotocol/sdk/types.js";
+import type { Progress } from "../../../../../vendor/mcp/client/index.mjs";
 import { redactResolvedReferenceData, redactResolvedReferenceValues } from "../../../../config-reference-redaction.ts";
 import type { McpToolCatalogEntry } from "../catalog.ts";
 import { ToolExecError } from "../errors.ts";

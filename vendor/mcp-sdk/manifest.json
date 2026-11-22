@@ -1,0 +1,32 @@
+{
+  "source": {
+    "repository": "https://github.com/modelcontextprotocol/typescript-sdk.git",
+    "revision": "5ebb589b970bfc8f98e344e13299f8eb76ff8cd1"
+  },
+  "patchSha256": "b7df49203fdbaa860b3eeb88eae552da2194a273b095259db8ba65f00948a69a",
+  "build": {
+    "image": "node:22-alpine@sha256:ab07539e0988b63558ff621f5fbe1077054c39d9809112974fb79993949d41cd",
+    "recipeSha256": "9e99b2285b7fd7e774974944ac5d11c7c481ed6340147f60ff1d95d649167969",
+    "node": "22.23.0",
+    "packageManager": "pnpm@10.26.1",
+    "lockSha256": "5f85c6bf87d20e737e4e81ffeeea3676bb3f40c8f9dd8b759ab9f34b6a1f7e19",
+    "core": "2.4.0+labpics.b7df49203fdb"
+  },
+  "artifacts": {
+    "client": {
+      "file": "client-1cb9f69adccfc302.tgz",
+      "bytes": 1809130,
+      "integrity": "sha512-FxYp1QcPaov3l0eel3RunV8R5vsdPmMmSpyC9SKKYJ/IaJjcJROZ6DUkqzaShhaNh16vgtYOhFv55+AY4F2Jcg=="
+    },
+    "server": {
+      "file": "server-72a06c1bfbcb3239.tgz",
+      "bytes": 1847657,
+      "integrity": "sha512-fDXk2KctSCAWOEPBJREni5+FN8e1wZocwDMWgSF+RJf5buFkKbMcrdpSDZhRdPKzzBW6ORuYZO3wT8i0ceQLQw=="
+    },
+    "core": {
+      "file": "core-7839126d31e3c101.tgz",
+      "bytes": 165800,
+      "integrity": "sha512-ru09vqou51oKwu9t4aaFrted+xUFA+kHe+bfEX5o+tf/fpoUy9W+xAJVpX1fe7sh4bdPzwUlEizoFlqDtCTx7Q=="
+    }
+  }
+}

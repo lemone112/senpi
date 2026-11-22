@@ -80,6 +80,7 @@ export async function openFixture(
 					return { resultType: "complete" };
 			}
 		})();
+		if (message.method.endsWith("/list")) Object.assign(result, { ttlMs: 0, cacheScope: "private" });
 		response.writeHead(200, { "Content-Type": "application/json" });
 		response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
 	});

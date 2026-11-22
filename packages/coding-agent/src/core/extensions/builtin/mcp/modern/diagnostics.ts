@@ -1,4 +1,4 @@
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCMessage } from "../../../../../vendor/mcp/client/index.mjs";
 import { McpMrtrError } from "./errors.ts";
 
 /** Control/diagnostic payloads are private from admission, not merely after consent starts. */

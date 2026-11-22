@@ -6,8 +6,12 @@ export function refreshMcpInstructionsForSession(service: McpService): void {
 	service.setMcpInstructions(buildMcpInstructionsBlock(service));
 }
 
-export function injectMcpInstructions(service: McpService, systemPrompt: string): string | undefined {
-	const instructions = service.getMcpInstructions();
+export function injectMcpInstructions(service: McpService, systemPrompt: string, pi?: object): string | undefined {
+	const pending = pi ? service.getPendingStartupServers(pi) : [];
+	const connecting = pending.length
+		? `<mcp_connecting>\nMCP servers still connecting: ${pending.map(escapeXml).join(", ")}. Their tool catalogs are not available yet. Use only advertised tools; retry discovery on a later turn after the servers connect.\n</mcp_connecting>`
+		: "";
+	const instructions = [service.getMcpInstructions(), connecting].filter(Boolean).join("\n\n");
 	if (instructions.length === 0) return undefined;
 	if (systemPrompt.includes(instructions)) return undefined;
 	return `${systemPrompt}\n\n${instructions}`;

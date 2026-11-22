@@ -45,7 +45,7 @@ describe("MRTR local termination boundaries", () => {
 		]);
 		const ui = mrtrTui();
 		await expect(
-			f.client.callTool({ name: "test" }, undefined, mcpRequestOptions(f.origin(ui.presentation))),
+			f.client.callTool({ name: "test" }, mcpRequestOptions(f.origin(ui.presentation))),
 		).rejects.toMatchObject({ code: "MCP_MRTR_ROUND_LIMIT" });
 		expect(f.transport.calls).toHaveLength(9);
 	});

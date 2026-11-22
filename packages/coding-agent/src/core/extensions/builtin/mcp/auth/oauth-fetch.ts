@@ -1,4 +1,4 @@
-import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { FetchLike } from "../../../../../vendor/mcp/client/index.mjs";
 
 // Optional OAuth response fields some servers send as `null` or `""` instead of omitting them. The SDK's
 // schemas reject `null` (refresh_token, client_secret, ...) and coerce `expires_in: null` to 0, which would

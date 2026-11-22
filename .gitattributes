@@ -11,6 +11,8 @@
 
 # Archived patch artifacts preserve whitespace exactly
 packages/agent/docs/**/*.diff -whitespace
+vendor/mcp-sdk/source.patch -whitespace
+vendor/mcp-sdk/senpi/source.patch -whitespace
 
 # Common binary assets
 *.png binary

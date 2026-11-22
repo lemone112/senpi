@@ -1,5 +1,5 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
+import type { RequestOptions } from "../../../../vendor/mcp/client/index.mjs";
 import type { McpMrtrPresentation } from "../../../mcp-mrtr-presentations.ts";
 import type { McpFormPresentation } from "../../../mcp-form-types.ts";
 import type { ExtensionUIContext } from "../../types.ts";

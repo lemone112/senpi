@@ -1,4 +1,4 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "../../src/vendor/mcp/client/index.mjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ServerConnection } from "../../src/core/extensions/builtin/mcp/connection.ts";
 import { getMcpService, resetMcpServiceForTests } from "../../src/core/extensions/builtin/mcp/service.ts";

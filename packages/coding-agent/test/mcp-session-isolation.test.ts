@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../src/vendor/mcp/client/index.mjs";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConfigReloadHandoffRegistry } from "../src/core/extensions/builtin/config-reload/index.ts";
 import { configureMcpElicitation } from "../src/core/extensions/builtin/mcp/elicitation.ts";

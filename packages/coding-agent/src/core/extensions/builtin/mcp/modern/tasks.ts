@@ -1,3 +1,4 @@
+import type { McpTaskSubscription } from "./sdk-subscriptions.ts";
 import type { MrtrInputResponse } from "./elicitation.ts";
 import { McpMrtrError } from "./errors.ts";
 import { isRecord } from "./form-schema.ts";
@@ -51,6 +52,9 @@ export async function followMcpTask(
 		timeoutMs: number;
 		/** A host observer ending never cancels the server's accepted work. */
 		cancelOnAbort?: boolean;
+		subscription?: McpTaskSubscription;
+		/** Revalidate host authority before consuming a snapshot, including pushed results. */
+		beforeConsume?: () => Promise<void>;
 		send: (method: string, params: Record<string, unknown>, signal?: AbortSignal) => Promise<Record<string, unknown>>;
 		inputs: (result: Record<string, unknown>, signal: AbortSignal) => Promise<Record<string, MrtrInputResponse>>;
 		progress: (task: McpTaskProgress) => void | Promise<void>;
@@ -71,8 +75,12 @@ export async function followMcpTask(
 	let terminal = false;
 	let backoff = 1000;
 	try {
+		if (options.subscription && initial.resultType === "task")
+			task = parseMcpTask(await options.send("tasks/get", { taskId: id }, signal), id);
+		task = options.subscription?.take() ?? task;
 		for (;;) {
 			signal.throwIfAborted();
+			if (options.beforeConsume) await mcpInterrupted(options.beforeConsume(), signal);
 			if (task.status === "completed") {
 				terminal = true;
 				if (!isRecord(task.result)) throw new McpMrtrError("MCP_TASK_INVALID_RESULT", undefined, id);
@@ -107,6 +115,10 @@ export async function followMcpTask(
 					await options.send("tasks/update", { taskId: id, inputResponses: responses }, signal);
 					for (const key of Object.keys(outstanding)) answered.add(key);
 				}
+			}
+			if (options.subscription) {
+				task = await options.subscription.next(signal);
+				continue;
 			}
 			await mcpAbortableDelay(
 				options.clock,

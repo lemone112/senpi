@@ -1,5 +1,5 @@
 import { ConfigReferenceError } from "@earendil-works/pi-ai/utils/config-reference";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
 import { getAgentDir } from "../../../../config.ts";
 import { redactResolvedReferenceData } from "../../../config-reference-redaction.ts";
 import { getMcpMrtrPresentation } from "../../../mcp-mrtr-presentations.ts";
@@ -61,6 +61,7 @@ import {
 	McpDeferredAttach,
 	type McpStartupRaceResult,
 	raceMcpStartupConnect,
+	resolveMcpStartupTimeoutMs,
 	shouldRaceMcpStartup,
 	waitForMcpStartupRace,
 } from "./startup-race.ts";
@@ -129,6 +130,8 @@ export class McpService {
 	readonly #skillServerWarnings = new Set<string>();
 	#attachQueue: Promise<void> = Promise.resolve();
 	readonly #deferredAttach = new McpDeferredAttach();
+	readonly #startupRegistrations = new WeakMap<McpConnectionEntry, Promise<void>>();
+	readonly #preparedStartup = new WeakSet<McpSessionBinding>();
 	#latestWireStatus: McpWireStatusSnapshot = { servers: [] };
 	readonly #wireStatusBySession = new Map<string, McpWireStatusSnapshot>();
 	readonly #connections = new Map<string, McpConnectionEntry>();
@@ -712,6 +715,40 @@ export class McpService {
 		return this.#deferredAttach.wait(Math.max(0, timeoutMs - (Date.now() - startedAt)));
 	}
 
+	/** The first real turn waits only for its own uncached catalogs; session admission stays immediate. */
+	async prepareStartupCatalog(pi: object, signal?: AbortSignal): Promise<void> {
+		const binding = this.#bindingFor(pi);
+		if (!binding || this.#preparedStartup.has(binding)) return;
+		const lifetime = signal ? AbortSignal.any([signal, binding.lifetime.signal]) : binding.lifetime.signal;
+		await Promise.all(
+			this.#pendingStartupEntries(binding).map((entry) => {
+				const pending = this.#startupRegistrations.get(entry);
+				if (!pending) return Promise.resolve("settled");
+				return waitForMcpStartupRace(
+					pending,
+					resolveMcpStartupTimeoutMs(binding.config.servers[entry.name]?.config?.startupTimeoutMs),
+					lifetime,
+				);
+			}),
+		);
+		lifetime.throwIfAborted();
+		this.#preparedStartup.add(binding);
+	}
+
+	getPendingStartupServers(pi: object): readonly string[] {
+		const binding = this.#bindingFor(pi);
+		return binding ? this.#pendingStartupEntries(binding).map((entry) => entry.name) : [];
+	}
+
+	#pendingStartupEntries(binding: McpSessionBinding): McpConnectionEntry[] {
+		return [...this.#connections.values()].filter(
+			(entry) =>
+				entry.cachedCatalog === undefined &&
+				this.#startupRegistrations.has(entry) &&
+				offersConnection(binding, entry),
+		);
+	}
+
 	/** Subscribe to live MCP inventory transitions for session-scoped hosts. */
 	onWireStatusChanged(listener: McpWireStatusListener): () => void {
 		this.#wireStatusListeners.add(listener);
@@ -1038,6 +1075,9 @@ export class McpService {
 						shouldRefreshTools: () => !this.#disposed && this.#entryForName(name) === entry,
 						deadlineMs: 0,
 						onDeferred: (settled) => {
+							this.#startupRegistrations.set(entry, settled);
+							const clear = () => this.#startupRegistrations.delete(entry);
+							void settled.then(clear, clear);
 							this.#deferredAttach.track(settled);
 							startupConnects?.push(settled);
 						},

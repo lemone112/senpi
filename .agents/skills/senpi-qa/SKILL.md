@@ -101,10 +101,14 @@ OpenAI and Anthropic (pick with `--api`; default `openai-completions`):
 | `openai-responses` | `openai` | `/v1/responses` · Bearer |
 
 `--self-test` (no `--api`) round-trips all three and exercises the three
-error/retry scenarios below. `--with-tool` proves the full loop (model → bash tool → final text). `--with-mcp-tool` registers a sandbox
-extension that proxies `mcp_fx_tool_<n>` to the local MCP stdio fixture, then
-asserts the fixture call log exists and the model's second request contains the
-fixture result. The loop is hermetic: provider key env vars are stripped so only
+error/retry scenarios below. `--with-tool` proves the full loop (model → bash tool → final text).
+`--with-mcp-tool` writes a sandbox MCP configuration and enables the CLI's ordinary
+builtins, including permission enforcement. The builtin MCP service discovers and
+registers `mcp_fx_tool_<n>` through the native SDK. This scenario uses the CLI's
+RPC surface to send the first prompt immediately, relying on the configured
+`startupTimeoutMs` rather than a harness readiness wait; an observer extension records
+the tool result and verifies the model's second request
+contains that result. The loop is hermetic: provider key env vars are stripped so only
 the inline mock key is ever used.
 
 ```bash
@@ -150,7 +154,7 @@ node .agents/skills/senpi-qa/scripts/pty-drive.mjs --self-test --force-pipe
 | `scripts/rpc-drive.mjs --self-test` | `get_state` returns the documented `RpcSessionState`, no API call, auth unchanged |
 | `scripts/mock-loop.mjs --self-test` | scripted marker returns through the real loop via the mock provider; retry error injection proves same-model recovery, retry-budget fallback, and long-retry-after fallback; zero real calls; auth unchanged |
 | `scripts/mock-loop.mjs --with-tool` | full loop: two model turns served, bash tool ran, final text returned |
-| `scripts/mock-loop.mjs --with-mcp-tool <tool>` | full loop with a registered sandbox MCP stdio fixture proxy; fails if the requested `mcp_fx_tool_<n>` is not registered, invoked, and fed back to the model |
+| `scripts/mock-loop.mjs --with-mcp-tool <tool>` | full loop through the CLI's builtin MCP service, permissions and native SDK; fails if `mcp_fx_tool_<n>` is not discovered, registered, invoked, and fed back to the model |
 | `scripts/mock-loop.mjs --with-eval-hard-limit` | full loop where a never-returning eval cell is killed by its wall-clock hard limit and the kill is reported back to the model |
 | `scripts/eval-hard-limit-rpc-qa.mjs --self-test` | RPC channel: a DETACHED eval cell killed by the hard limit injects its `<system-reminder>` kill notice into the model's next request (print mode cannot show this) |
 | `scripts/tui-smoke.mjs --self-test` | TUI boots, renders, accepts a keystroke, tears down; auth unchanged |

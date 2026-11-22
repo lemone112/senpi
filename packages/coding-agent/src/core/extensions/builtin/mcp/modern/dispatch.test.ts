@@ -6,7 +6,7 @@ import type { McpServerConfig } from "../config-schema.ts";
 import { createMcpLogger } from "../log.ts";
 import { connectMcpTransport, createMcpTransport, shutdownMcpTransport } from "../transport.ts";
 import { materializeMcpTransport } from "../transport-sdk.ts";
-import { MODERN_PROTOCOL_VERSION } from "./wire.ts";
+const MODERN_PROTOCOL_VERSION = "2026-07-28";
 
 const config: McpServerConfig = {
 	type: "http",
@@ -48,7 +48,10 @@ describe("dual-era factory dispatch", () => {
 				return Response.json({
 					jsonrpc: "2.0",
 					id: request.id,
-					result: request.method === "server/discover" ? discovery : { resultType: "complete", tools: [] },
+					result:
+						request.method === "server/discover"
+							? discovery
+							: { resultType: "complete", ttlMs: 0, cacheScope: "private", tools: [] },
 				});
 			}),
 		);
@@ -159,7 +162,7 @@ describe("dual-era factory dispatch", () => {
 		},
 	);
 
-	it("does not downgrade a recognized modern error to SDK initialize", async () => {
+	it("does not downgrade a typed unsupported modern version to SDK initialize", async () => {
 		const methods: string[] = [];
 		vi.stubGlobal(
 			"fetch",
@@ -167,7 +170,15 @@ describe("dual-era factory dispatch", () => {
 				const request = JSON.parse(String(init?.body));
 				methods.push(request.method);
 				return Response.json(
-					{ jsonrpc: "2.0", id: request.id, error: { code: -32021, message: "Missing capability" } },
+					{
+						jsonrpc: "2.0",
+						id: request.id,
+						error: {
+							code: -32022,
+							message: "Unsupported protocol version",
+							data: { supported: ["2027-01-01"], requested: "2026-07-28" },
+						},
+					},
 					{ status: 400 },
 				);
 			}),
@@ -179,7 +190,7 @@ describe("dual-era factory dispatch", () => {
 			serverName: "modern",
 		});
 		try {
-			await expect(connectMcpTransport(connection)).rejects.toThrow(/modern discovery failed/);
+			await expect(connectMcpTransport(connection)).rejects.toThrow(/no compatible protocol version/);
 			expect(methods).toEqual(["server/discover"]);
 		} finally {
 			await shutdownMcpTransport(connection);

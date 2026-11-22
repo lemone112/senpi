@@ -22,6 +22,7 @@ import { createInterface } from "node:readline";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareMcpSdkVendor } from "./prepare-mcp-sdk-vendor.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const args = new Set(process.argv.slice(2));
@@ -202,11 +203,7 @@ function buildNativeRust() {
 }
 
 function checkWorkspaceDependencyPins() {
-	const codingAgentPackage = JSON.parse(readFileSync(join(ROOT, "packages", "coding-agent", "package.json"), "utf8"));
-	const mcpSdkVersion = codingAgentPackage.dependencies?.["@modelcontextprotocol/sdk"];
-	if (typeof mcpSdkVersion === "string" && !/^\d+\.\d+\.\d+$/.test(mcpSdkVersion)) {
-		warn(`@modelcontextprotocol/sdk should stay exact-pinned; found ${mcpSdkVersion}.`);
-	}
+	prepareMcpSdkVendor({ check: true });
 }
 
 // 3. Credentials: .env.local ----------------------------------------------

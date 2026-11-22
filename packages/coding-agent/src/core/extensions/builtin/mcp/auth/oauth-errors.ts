@@ -54,10 +54,11 @@ export function isTransientTokenError(error: unknown): boolean {
 	return /\b(?:500|502|503|504)\b/.test(text) || text.includes("econnrefused") || text.includes("network");
 }
 
-// SDK OAuth errors expose a machine-readable `errorCode` (RFC 6749 §5.2).
+// SDK OAuth errors expose the RFC 6749 §5.2 discriminator as `code`;
+// their human-readable description need not contain that value.
 function oauthErrorCode(error: unknown): string | undefined {
 	if (typeof error !== "object" || error === null) return undefined;
-	const code = (error as { errorCode?: unknown }).errorCode;
+	const code = (error as { code?: unknown }).code;
 	return typeof code === "string" ? code : undefined;
 }
 

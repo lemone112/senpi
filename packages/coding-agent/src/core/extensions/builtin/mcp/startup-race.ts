@@ -7,7 +7,7 @@ import { createMcpLogger } from "./log.ts";
 import { ensureMcpResourceSubscriptions } from "./resources.ts";
 import type { McpConnectionEntry, McpStartupCatalogClaim } from "./service-types.ts";
 import { SharedMcpLease } from "./shared-lease.ts";
-import { safeTimer } from "./wrap.ts";
+import { mcpInterrupted, safeTimer } from "./wrap.ts";
 
 export const MCP_STARTUP_RACE_MS = 250;
 export const MCP_STARTUP_TIMEOUT_ENV = "SENPI_MCP_STARTUP_TIMEOUT_MS";
@@ -20,7 +20,7 @@ export const MCP_STARTUP_TIMEOUT_ENV = "SENPI_MCP_STARTUP_TIMEOUT_MS";
 export const MCP_ATTACH_SETTLE_TIMEOUT_MS = 5_000;
 
 /**
- * Resolve the startup-race window (ms) a server's attach connect is bounded by.
+ * Resolve the first-turn window (ms) for an uncached server's startup catalog.
  * Precedence: the `SENPI_MCP_STARTUP_TIMEOUT_MS` env override (a global escape
  * hatch) beats the per-server `startupTimeoutMs`, which beats the default. A
  * non-numeric or negative env value is ignored; `0` is honored and makes the
@@ -245,10 +245,11 @@ async function refreshMcpToolsAfterStartupRace(options: RaceMcpStartupConnectOpt
 export async function waitForMcpStartupRace(
 	connect: Promise<void>,
 	deadlineMs = MCP_STARTUP_RACE_MS,
+	signal?: AbortSignal,
 ): Promise<McpStartupRaceResult> {
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	try {
-		return await Promise.race([
+		const race = Promise.race([
 			connect.then(() => "settled" as const),
 			new Promise<"timeout">((resolve) => {
 				timeout = safeTimer("startup.race", deadlineMs, () => resolve("timeout"), {
@@ -256,6 +257,7 @@ export async function waitForMcpStartupRace(
 				});
 			}),
 		]);
+		return await (signal ? mcpInterrupted(race, signal) : race);
 	} finally {
 		if (timeout !== undefined) clearTimeout(timeout);
 	}

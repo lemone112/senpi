@@ -178,7 +178,7 @@ describe("todo35 list_changed: live fixture subscription", () => {
 		});
 
 		// The fixture emits tools/list_changed after every tool call.
-		await client.callTool({ name: "tool_1", arguments: { value: "go" } }, undefined, { timeout: 4000 });
+		await client.callTool({ name: "tool_1", arguments: { value: "go" } }, { timeout: 4000 });
 
 		// Give the notification a moment to propagate.
 		const deadline = Date.now() + 2000;

@@ -51,8 +51,8 @@ import {
 	checkRealAuthUnchanged,
 	hermeticEnv,
 	mcpFixtureForToolName,
+	runMcpFixtureTurn,
 	reasoningScriptedTurn,
-	safeErrorReason,
 	validateMcpFixtureToolResult,
 	writeMcpFixtureExtension,
 	writeMockModelsJson,
@@ -134,13 +134,15 @@ async function driveTurn({
 		"--model",
 		p.modelId,
 		"--no-context-files",
-		"--no-extensions",
+		...(prepared.enableBuiltinExtensions ? [] : ["--no-extensions"]),
 		...(prepared.extraArgs ?? []),
 		...extraArgs,
 		"--print",
 		prompt,
 	];
-	const result = await runCli(args, { env: hermeticEnv(box.env), cwd: box.cwd, timeoutMs });
+	const result = prepared.enableBuiltinExtensions
+		? await runMcpFixtureTurn({ box, args: args.slice(0, -2), prompt, timeoutMs, toolCount: prepared.mcpToolCount })
+		: await runCli(args, { env: hermeticEnv(box.env), cwd: box.cwd, timeoutMs });
 	if (followUpPrompts.length > 0) {
 		let combined = result;
 		for (const followUp of followUpPrompts) {
@@ -515,7 +517,7 @@ async function withMcpTool(apiName, toolName, toolArgs, evidenceSlug) {
 		toolName,
 		toolArgs,
 		marker: `MCP-TOOL-LOOP-OK:${toolName}:${fixture.resultPrefix}`,
-		extraArgs: ["--approve", "--tools", toolName],
+		extraArgs: ["--approve", "--permission", `${toolName}=allow`],
 		prepareSandbox: (box) => writeMcpFixtureExtension(box, { toolName, fixture }),
 		validateToolResult: ({ prepared, server }) => validateMcpFixtureToolResult({ prepared, server }),
 		evidenceSlug,
@@ -544,7 +546,7 @@ async function withNamedTool({
 		prepareSandbox,
 		timeoutMs: 120000,
 	});
-	checks.ok("CLI completed the multi-step loop", !result.timedOut, `code=${result.code}`);
+	checks.ok("CLI completed the multi-step loop", result.code === 0 && !result.timedOut, `code=${result.code}`);
 	checks.ok("two model turns served (loop iterated)", server.requests.length >= 2, `requests=${server.requests.length}`);
 	if (validateToolResult) {
 		const toolResult = validateToolResult({ prepared, server, result });

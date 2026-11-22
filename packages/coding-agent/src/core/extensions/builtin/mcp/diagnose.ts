@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { join } from "node:path";
 import { redactResolvedReferenceValues } from "../../../config-reference-redaction.ts";
 import type { McpServerConfig } from "./config-schema.ts";
 import { ConnectError } from "./errors.ts";
@@ -56,17 +57,34 @@ function connectErrorFromDiagnostic(
 
 export async function maybeDiagnoseStdioFailure(options: McpStdioDiagnosticOptions): Promise<string | null> {
 	if (options.config.type !== "stdio") return null;
-	const captured = extractCapturedStderr(options.logger);
-	if (captured.length > 0) return boundDiagnostic(captured);
 	const command = options.config.command;
 	if (command === undefined || command.trim().length === 0) return null;
 	const env = await buildDiagnosticEnv(options);
+	// cross-spawn may report a missing Windows executable as cmd.exe stderr + EOF.
+	// Resolve it without executing the server or parsing localized console text.
+	if (process.platform === "win32" && (await missingWindowsCommand(command, env, options.config.cwd)))
+		return commandNotFoundDiagnostic(command, env, options);
+	const captured = extractCapturedStderr(options.logger);
+	if (captured.length > 0) return boundDiagnostic(captured);
 	const result = await execFileForDiagnostics(command, options.config.args, { cwd: options.config.cwd, env });
 	if (isNodeErrorCode(result.error, "ENOENT")) return commandNotFoundDiagnostic(command, env, options);
 	const lines = meaningfulLines(`${result.stderr}\n${result.stdout}`);
 	if (lines.length > 0) return boundDiagnostic(lines);
 	if (isTimedOut(result.error)) return `diagnostic rerun timed out after ${MCP_STDIO_DIAGNOSTIC_TIMEOUT_MS}ms`;
 	return null;
+}
+
+function missingWindowsCommand(command: string, env: Record<string, string>, cwd?: string): Promise<boolean> {
+	const systemRoot = process.env.SystemRoot;
+	if (!systemRoot) return Promise.resolve(false);
+	return new Promise((resolve) => {
+		execFile(
+			join(systemRoot, "System32", "where.exe"),
+			["/q", command],
+			{ env, cwd, windowsHide: true, timeout: 1000 },
+			(error) => resolve(error !== null && getProperty(error, "code") === 1),
+		);
+	});
 }
 
 function extractCapturedStderr(logger: McpLogger): string[] {

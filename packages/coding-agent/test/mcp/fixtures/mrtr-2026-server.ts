@@ -58,7 +58,11 @@ export class MrtrScript {
 		) {
 			return { jsonrpc: "2.0", id: request.id, error: { code: -32020, message: "invalid metadata" } };
 		}
-		const result = (value: unknown) => ({ jsonrpc: "2.0", id: request.id, result: value });
+		const result = (value: unknown) => ({
+			jsonrpc: "2.0",
+			id: request.id,
+			result: value && typeof value === "object" ? { resultType: "complete", ...value } : value,
+		});
 		if (request.method === "server/discover")
 			return result({
 				resultType: "complete",
@@ -68,6 +72,9 @@ export class MrtrScript {
 			});
 		if (request.method === "tools/list" && !this.methods.has("tools/list"))
 			return result({
+				resultType: "complete",
+				ttlMs: 0,
+				cacheScope: "private",
 				tools: this.tools ?? [
 					{
 						name: "fixture",
@@ -77,14 +84,24 @@ export class MrtrScript {
 				],
 			});
 		if (request.method === "prompts/list" && !this.methods.has(request.method))
-			return result({ prompts: [{ name: "fixture", description: "Synthetic MRTR form" }] });
+			return result({
+				resultType: "complete",
+				ttlMs: 0,
+				cacheScope: "private",
+				prompts: [{ name: "fixture", description: "Synthetic MRTR form" }],
+			});
 		if (request.method === "resources/list" && !this.methods.has(request.method))
-			return result({ resources: [{ name: "fixture", uri: "test://fixture" }] });
+			return result({
+				resultType: "complete",
+				ttlMs: 0,
+				cacheScope: "private",
+				resources: [{ name: "fixture", uri: "test://fixture" }],
+			});
 		if (request.method === "resources/templates/list" && !this.methods.has(request.method))
-			return result({ resourceTemplates: [] });
-		if (request.method === "ping") return result({});
+			return result({ resultType: "complete", ttlMs: 0, cacheScope: "private", resourceTemplates: [] });
+		if (request.method === "ping") return result({ resultType: "complete" });
 		const application = this.methods.has(request.method);
-		if (!application) return result({});
+		if (!application) return result({ resultType: "complete" });
 		const round = this.requests.length;
 		this.requests.push(request);
 		if (round > 0) this.emit("continuationReceived", request);
@@ -94,7 +111,12 @@ export class MrtrScript {
 			return result(intermediate);
 		}
 		if (request.method === "resources/read")
-			return result({ resultType: "complete", contents: [{ uri: params.uri, text: "final resource" }] });
+			return result({
+				resultType: "complete",
+				ttlMs: 0,
+				cacheScope: "private",
+				contents: [{ uri: params.uri, text: "final resource" }],
+			});
 		if (request.method === "prompts/get")
 			return result({
 				resultType: "complete",
@@ -117,6 +139,13 @@ export async function startMrtrServer(script: MrtrScript, sse = false) {
 		if (message.method === "notifications/cancelled") {
 			script.emit("cancelReceived", message);
 			response.writeHead(204).end();
+			return;
+		}
+		if (message.method === "subscriptions/listen") {
+			response.writeHead(200, { "Content-Type": "text/event-stream" });
+			response.write(
+				`data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/subscriptions/acknowledged", params: { _meta: { "io.modelcontextprotocol/subscriptionId": message.id }, notifications: {} } })}\n\n`,
+			);
 			return;
 		}
 		const reply = script.reply(message);

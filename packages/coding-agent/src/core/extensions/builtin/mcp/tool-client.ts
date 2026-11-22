@@ -1,5 +1,5 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { Client } from "../../../../vendor/mcp/client/index.mjs";
+import type { RequestOptions } from "../../../../vendor/mcp/client/index.mjs";
 import { isModernMcpClient } from "./modern/request.ts";
 import { callModernTool, listModernTools } from "./modern/tools.ts";
 import type { McpJsonSchema, McpListedTool, McpToolResult } from "./tool-contracts.ts";
@@ -23,6 +23,6 @@ export async function callMcpToolRequest(
 	outputSchema: McpJsonSchema | undefined,
 	options?: RequestOptions,
 ): Promise<McpToolResult> {
-	if (!isModernMcpClient(client)) return client.callTool(params, undefined, options);
+	if (!isModernMcpClient(client)) return client.callTool(params, options);
 	return callModernTool(client, params, outputSchema, options);
 }

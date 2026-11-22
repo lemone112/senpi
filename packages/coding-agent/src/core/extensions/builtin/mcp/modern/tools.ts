@@ -1,5 +1,5 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { Client } from "../../../../../vendor/mcp/client/index.mjs";
+import type { RequestOptions } from "../../../../../vendor/mcp/client/index.mjs";
 import { z } from "zod";
 import { loadMcpSdkTypes } from "../sdk.lazy.ts";
 import type { McpJsonSchema } from "../tool-contracts.ts";

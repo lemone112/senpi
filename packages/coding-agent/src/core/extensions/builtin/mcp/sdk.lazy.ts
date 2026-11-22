@@ -1,8 +1,7 @@
 /**
- * Lazy boundary for `@modelcontextprotocol/sdk`.
+ * Lazy boundary for the pinned modular MCP SDK in src/vendor/mcp.
  *
- * The SDK is 210 files / ~1.16 MB and every CLI start used to parse, compile
- * and evaluate all of it, because the mcp builtin is statically reachable from
+ * Every CLI start used to parse, compile and evaluate the SDK because the MCP builtin is statically reachable from
  * the builtin barrel. Nothing in the SDK is needed until a run actually
  * connects a transport, builds a client, registers a request handler or drives
  * the OAuth flow — all of which happen inside already-async code paths — so
@@ -14,7 +13,7 @@
  * the SDK reappears in `dist/main.js`.
  */
 
-type SdkAuthModule = typeof import("@modelcontextprotocol/sdk/client/auth.js");
+type SdkAuthModule = typeof import("../../../../vendor/mcp/client/index.mjs");
 
 /**
  * Loads once and caches. Concurrent callers share the in-flight promise; a
@@ -38,25 +37,34 @@ function memoizeLoader<T>(load: () => Promise<T>): () => Promise<T> {
 }
 
 /** `Client` — the MCP client class, built once per transport connection. */
-export const loadMcpSdkClient = memoizeLoader(() => import("@modelcontextprotocol/sdk/client/index.js"));
+export const loadMcpSdkClient = memoizeLoader(() => import("../../../../vendor/mcp/client/index.mjs"));
 
-/** Compatibility parser for final caller schemas at the modern request boundary. */
-export const loadMcpSdkZodCompat = memoizeLoader(() => import("@modelcontextprotocol/sdk/server/zod-compat.js"));
+/** Validate the caller's final contract through its own Standard Schema implementation. */
+export async function parseMcpResult<T>(
+	schema: import("../../../../vendor/mcp/client/index.mjs").StandardSchemaV1<unknown, T>,
+	value: unknown,
+) {
+	const parsed = await schema["~standard"].validate(value);
+	return parsed.issues ? { success: false as const } : { success: true as const, data: parsed.value };
+}
 
 /** `StdioClientTransport` + `getDefaultEnvironment` — stdio servers and the stdio diagnostic rerun. */
-export const loadMcpSdkStdioTransport = memoizeLoader(() => import("@modelcontextprotocol/sdk/client/stdio.js"));
+export const loadMcpSdkStdioTransport = memoizeLoader(() => import("../../../../vendor/mcp/client/stdio.mjs"));
 
 /** SDK-owned protocol schemas for elicitation and modern request results. */
-export const loadMcpSdkTypes = memoizeLoader(() => import("@modelcontextprotocol/sdk/types.js"));
+export const loadMcpSdkTypes = memoizeLoader(async () => ({
+	...(await import("../../../../vendor/mcp/core/index.mjs")),
+	...(await loadMcpSdkClient()),
+}));
 
 /** SDK-owned request defaults, loaded only by negotiated modern operations. */
-export const loadMcpSdkProtocol = memoizeLoader(() => import("@modelcontextprotocol/sdk/shared/protocol.js"));
+export const loadMcpSdkProtocol = loadMcpSdkClient;
 
 let authModule: SdkAuthModule | undefined;
 
 /** OAuth 2.1 discovery, authorization, token exchange and refresh. */
 export const loadMcpSdkAuth = memoizeLoader(async (): Promise<SdkAuthModule> => {
-	const module = await import("@modelcontextprotocol/sdk/client/auth.js");
+	const module = await loadMcpSdkClient();
 	authModule = module;
 	return module;
 });
@@ -65,18 +73,18 @@ export const loadMcpSdkAuth = memoizeLoader(async (): Promise<SdkAuthModule> => 
  * `StreamableHTTPClientTransport`. Loading it also seats the auth module: the
  * HTTP transport is the only transport that raises the SDK's
  * `UnauthorizedError`, and {@link isMcpSdkUnauthorizedError} can only recognize
- * an instance once the class that produced it is cached here. `auth.js` is
- * already part of `streamableHttp.js`'s own static graph, so this is free.
+ * an instance once the class that produced it is cached here. The modular
+ * client entry exports both transport and auth, so this is the same load.
  */
 export const loadMcpSdkStreamableHttpTransport = memoizeLoader(async () => {
-	const [module] = await Promise.all([import("@modelcontextprotocol/sdk/client/streamableHttp.js"), loadMcpSdkAuth()]);
+	const [module] = await Promise.all([loadMcpSdkClient(), loadMcpSdkAuth()]);
 	return module;
 });
 
 /**
  * Whether `error` is the SDK's `UnauthorizedError` (the signal that a server
  * needs OAuth). Synchronous on purpose — every caller is a plain error
- * predicate — and exact: an instance can only exist once `auth.js` has been
+ * predicate — and exact: an instance can only exist once the client entry has been
  * evaluated, and every path that can produce one awaits a loader above first.
  * The class carries no distinguishing `name`, so identity is the only check.
  */

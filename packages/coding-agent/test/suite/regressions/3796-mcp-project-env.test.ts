@@ -3,7 +3,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { McpService } from "../../../src/core/extensions/builtin/mcp/service.ts";
 import { fakePi } from "../../mcp/fixtures/service-lifecycle.ts";
@@ -22,7 +21,7 @@ it("offers one permanent grant before spawn and restores only its referenced nam
 	vi.stubEnv("ODD_DSN", "synthetic-dsn");
 	vi.stubEnv("ODD_COOKIE", "synthetic-cookie");
 	const receipt = join(root, "grant-receipt.json");
-	const fixture = fileURLToPath(new URL("../../mcp/fixtures/stdio-server.ts", import.meta.url));
+	const fixture = new URL("../../mcp/fixtures/stdio-server.ts", import.meta.url).href;
 	const script = [
 		`import {writeFileSync} from "node:fs";`,
 		`writeFileSync(${JSON.stringify(receipt)},JSON.stringify({reference:process.env.REF,cookie:process.env.ODD_COOKIE}));`,
@@ -79,7 +78,7 @@ it("passes finite project base and explicit env while withholding ungranted refe
 	vi.stubEnv("LC_SECRET", "synthetic-private");
 	vi.stubEnv("ODD_DSN", "synthetic-dsn");
 	const receipt = join(root, "receipt.json");
-	const fixture = fileURLToPath(new URL("../../mcp/fixtures/stdio-server.ts", import.meta.url));
+	const fixture = new URL("../../mcp/fixtures/stdio-server.ts", import.meta.url).href;
 	const script = [
 		`import {writeFileSync} from "node:fs";`,
 		`writeFileSync(${JSON.stringify(receipt)},JSON.stringify({`,
@@ -157,7 +156,7 @@ it("skips a trusted project skill server that declares a reference object", asyn
 // project skill server re-keys it and the next connect runs the new declaration.
 it("reconnects a project skill server with its edited env", async () => {
 	const receipt = join(root, "edit-receipt.json");
-	const fixture = fileURLToPath(new URL("../../mcp/fixtures/stdio-server.ts", import.meta.url));
+	const fixture = new URL("../../mcp/fixtures/stdio-server.ts", import.meta.url).href;
 	const script = [
 		`import {writeFileSync} from "node:fs";`,
 		`writeFileSync(${JSON.stringify(receipt)},JSON.stringify({ref:process.env.REF}));`,

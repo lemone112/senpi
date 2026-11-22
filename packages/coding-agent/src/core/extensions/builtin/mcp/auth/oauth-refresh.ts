@@ -1,6 +1,6 @@
-import type { OAuthServerInfo } from "@modelcontextprotocol/sdk/client/auth.js";
-import type { AuthorizationServerMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
-import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { OAuthServerInfo } from "../../../../../vendor/mcp/client/index.mjs";
+import type { AuthorizationServerMetadata, OAuthTokens } from "../../../../../vendor/mcp/client/index.mjs";
+import type { FetchLike } from "../../../../../vendor/mcp/client/index.mjs";
 import { loadMcpSdkAuth } from "../sdk.lazy.ts";
 import { safeDelay } from "../wrap.ts";
 import { isInvalidGrant, isTransientTokenError, OAuthFlowError } from "./oauth-errors.ts";
